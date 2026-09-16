@@ -39,7 +39,7 @@ cookie jar 自身并发安全）。配置项（`WithXxx`）只在 `NewClient` �
 
 ## Cookie 管理
 
-Cookie 仅保存在内存中，SDK 不读写任何文件；是否持久化、存到哪里由调用方自行决定。
+Cookie 仅保存在内存中，Client 不读写任何文件；是否持久化、存到哪里由调用方自行决定。
 
 ```go
 func (c *Client) ExportCookies() ([]byte, error)   // 导出为 JSON

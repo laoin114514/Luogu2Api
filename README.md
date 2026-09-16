@@ -1,6 +1,6 @@
-# LuoguSDK
+# LuoguClient
 
-洛谷 (luogu.com.cn) 平台的 Go SDK，覆盖认证、题目、记录、题单等核心功能。
+洛谷 (luogu.com.cn) 平台的 Go Client，覆盖认证、题目、记录、题单等核心功能。
 
 ## 安装
 
@@ -24,7 +24,7 @@ func main() {
     // 登录（首次需要手动输入验证码）
     if !client.Auth.IsAuthenticated() {
         client.Auth.RefreshCSRF()
-        client.Auth.LoginWithSolver("username", "password", mySolver) // mySolver 需自行实现，SDK 不内置 OCR
+        client.Auth.LoginWithSolver("username", "password", mySolver) // mySolver 需自行实现，Client 不内置 OCR
         // 登录响应体不含 uid，自身 UID 从 _uid cookie 读取；OCR 识别会偶发出错，建议失败重试
         fmt.Println(client.UID())
     }
@@ -53,7 +53,7 @@ func main() {
 
 ## Cookie 管理
 
-Cookie 只保存在内存中，SDK 不读写任何文件。是否持久化、存到哪里（文件、数据库、Redis 等）由调用方自行决定。
+Cookie 只保存在内存中，Client 不读写任何文件。是否持久化、存到哪里（文件、数据库、Redis 等）由调用方自行决定。
 
 ```go
 client, _ := luogu.NewClient()
@@ -124,7 +124,7 @@ luoguClient/
 
 `Client` 及其 Service 可并发使用；配置项（`WithXxx`）只在 `NewClient` 构造期间生效。
 
-**验证码需要自己识别**：SDK 只定义 `CaptchaSolver` 函数类型（不内置 OCR），
+**验证码需要自己识别**：Client 只定义 `CaptchaSolver` 函数类型（不内置 OCR），
 `example/main.go` 的做法是把验证码图片存成 `captcha.jpg` 后手动输入。
 
 ## 错误类型
@@ -138,7 +138,7 @@ luoguClient/
 
 `CSRFError` 与 `NetworkError` 支持 `errors.Unwrap()`；`AuthError` 与 `UnauthorizedError` 不包装底层错误。
 需要登录的接口（`/record/*`、`/problem/solution/*`、`/training/{id}`、`/user/setting` 等）在未登录时返回 401，
-SDK 统一转换成 `*luogu.UnauthorizedError`，可用 `errors.As` 判断；详见 `api.md`。
+Client 统一转换成 `*luogu.UnauthorizedError`，可用 `errors.As` 判断；详见 `api.md`。
 
 ## 许可证
 

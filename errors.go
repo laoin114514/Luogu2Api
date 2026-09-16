@@ -50,7 +50,7 @@ func (e *NetworkError) Unwrap() error {
 // UnauthorizedError 未登录（或权限不足）时调用需认证的 API
 //
 // 洛谷对未登录访问受保护页面（/record/*、/problem/solution/*、/training/{id}、
-// /user/setting 等）直接返回 401，SDK 将其统一转换成本类型。
+// /user/setting 等）直接返回 401，Client 将其统一转换成本类型。
 type UnauthorizedError struct {
 	StatusCode int    // 触发该错误的 HTTP 状态码（401/403）
 	Message    string // 触发该错误的操作描述，例如 "get problem P1001"

@@ -16,7 +16,7 @@ func main() {
 	username := os.Args[1]
 	password := os.Args[2]
 
-	// 1. 创建客户端（cookie 只保存在内存中，SDK 不读写文件）
+	// 1. 创建客户端（cookie 只保存在内存中，Client 不读写文件）
 	client, err := luogu.NewClient()
 	if err != nil {
 		fmt.Printf("创建客户端失败: %v\n", err)

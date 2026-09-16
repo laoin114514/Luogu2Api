@@ -19,7 +19,7 @@ import (
 const defaultUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36 Edg/148.0.0.0"
 const luoguBaseURL = "https://www.luogu.com.cn/"
 
-// Client 洛谷 SDK 客户端
+// Client 洛谷 Client 客户端
 //
 // Client 可以并发使用：csrfToken 由 mu 保护，cookie jar 自身并发安全。
 // 配置项（WithXxx）只在 NewClient 构造期间生效，构造完成后不应再改动；
