@@ -18,6 +18,7 @@ type fakeAccountStore struct {
 	nextID   uint
 
 	createdErr error
+	revived    bool
 	deleted    []uint
 	enabledSet map[uint]bool
 	states     []model.PoolState
@@ -34,14 +35,20 @@ func newFakeAccountStore(accounts ...*model.Account) *fakeAccountStore {
 	return s
 }
 
-func (s *fakeAccountStore) Create(_ context.Context, acc *model.Account) error {
+func (s *fakeAccountStore) Create(_ context.Context, acc *model.Account) (bool, error) {
 	if s.createdErr != nil {
-		return s.createdErr
+		return false, s.createdErr
+	}
+	if s.revived {
+		// 模拟"复活软删除的同名行"：主键沿用旧行
+		acc.ID = s.nextID
+		s.accounts[acc.ID] = acc
+		return true, nil
 	}
 	s.nextID++
 	acc.ID = s.nextID
 	s.accounts[acc.ID] = acc
-	return nil
+	return false, nil
 }
 
 func (s *fakeAccountStore) GetByID(_ context.Context, id uint) (*model.Account, error) {
@@ -202,6 +209,28 @@ func TestCreateSucceedsEvenIfFirstLoginFails(t *testing.T) {
 	}
 }
 
+// 同名账号此前被软删除时，创建应复活原行（主键不变、状态重置为待登录）
+func TestCreateRevivesSoftDeletedAccount(t *testing.T) {
+	store := newFakeAccountStore(sampleAccount(7))
+	store.revived = true
+	pool := &fakeAccountPool{}
+	svc := newTestAccountService(store, pool)
+
+	dto, err := svc.Create(context.Background(), "user1", "new-password", "昵称")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if dto.ID != 7 {
+		t.Errorf("复活应沿用旧主键 7，实际 %d", dto.ID)
+	}
+	if len(pool.loaded) != 1 || pool.loaded[0] != 7 {
+		t.Errorf("复活后应载入号池，实际 %v", pool.loaded)
+	}
+	if len(pool.relogined) != 1 {
+		t.Errorf("复活后应尝试登录，实际 %v", pool.relogined)
+	}
+}
+
 func TestCreatePropagatesDuplicate(t *testing.T) {
 	store := newFakeAccountStore()
 	store.createdErr = model.ErrAccountExists
@@ -291,6 +320,32 @@ func TestSetEnabledKeepsActiveStatus(t *testing.T) {
 	}
 	if len(store.states) != 0 {
 		t.Errorf("正常账号不应被复位: %+v", store.states)
+	}
+}
+
+// 被封禁的账号同样要能人工恢复：解封后 PATCH enabled=true 应复位状态重新验证
+func TestSetEnabledRevivesBannedAccount(t *testing.T) {
+	acc := sampleAccount(1)
+	acc.Status = model.AccountStatusBanned
+	acc.Online = false
+	acc.LastError = "登录成功但所有接口均返回 403"
+
+	store := newFakeAccountStore(acc)
+	pool := &fakeAccountPool{}
+	svc := newTestAccountService(store, pool)
+
+	dto, err := svc.SetEnabled(context.Background(), 1, true)
+	if err != nil {
+		t.Fatalf("SetEnabled: %v", err)
+	}
+	if dto.Status != model.AccountStatusNew {
+		t.Errorf("Status = %q, want %q", dto.Status, model.AccountStatusNew)
+	}
+	if len(store.states) != 1 || store.states[0].NextVerifyAt != nil {
+		t.Errorf("应复位并立即到期: %+v", store.states)
+	}
+	if len(pool.loaded) != 1 {
+		t.Errorf("应重新载入号池，实际 %v", pool.loaded)
 	}
 }
 

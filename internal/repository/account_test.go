@@ -88,7 +88,7 @@ func TestAccountCreateEncryptsCredentials(t *testing.T) {
 		Cookie:   `[{"name":"_uid","value":"1965145"}]`,
 		Enabled:  true,
 	}
-	if err := repo.Create(ctx, acc); err != nil {
+	if _, err := repo.Create(ctx, acc); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	if acc.ID == 0 {
@@ -124,13 +124,93 @@ func TestAccountCreateRejectsDuplicateUsername(t *testing.T) {
 	ctx := context.Background()
 
 	acc := &model.Account{Username: repo.username("dup"), Password: "pwd", Enabled: true}
-	if err := repo.Create(ctx, acc); err != nil {
+	if _, err := repo.Create(ctx, acc); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
 	dup := &model.Account{Username: acc.Username, Password: "pwd2", Enabled: true}
-	if err := repo.Create(ctx, dup); !errors.Is(err, model.ErrAccountExists) {
+	if _, err := repo.Create(ctx, dup); !errors.Is(err, model.ErrAccountExists) {
 		t.Errorf("err = %v, want ErrAccountExists", err)
+	}
+}
+
+// 同名账号软删除后重建：应复活原行（沿用主键）并重置成"刚导入"的状态
+func TestAccountCreateRevivesSoftDeletedUsername(t *testing.T) {
+	repo, _ := newRepo(t)
+	ctx := context.Background()
+
+	first := &model.Account{Username: repo.username("revive"), Password: "old-pwd", Enabled: true}
+	if _, err := repo.Create(ctx, first); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// 先让它像"用过一阵子"：有登录态、平台档案、失败计数
+	now := time.Now().Truncate(time.Second)
+	if err := repo.SaveSession(ctx, first.ID, `[{"name":"_uid","value":"1965145"}]`, 1965145,
+		model.LuoguProfile{Name: "老昵称", RawJSON: `{"uid":1965145}`}, now, now.Add(time.Hour)); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+	if err := repo.UpdatePoolState(ctx, first.ID, model.PoolState{
+		Online:       false,
+		Status:       model.AccountStatusBanned,
+		FailureCount: 2,
+		LastError:    "登录成功但所有接口均返回 403",
+	}); err != nil {
+		t.Fatalf("UpdatePoolState: %v", err)
+	}
+	if err := repo.SoftDelete(ctx, first.ID); err != nil {
+		t.Fatalf("SoftDelete: %v", err)
+	}
+
+	// 同名重建
+	second := &model.Account{Username: first.Username, Password: "new-pwd", Nickname: "新昵称", Enabled: true}
+	revived, err := repo.Create(ctx, second)
+	if err != nil {
+		t.Fatalf("Create(revive): %v", err)
+	}
+	if !revived {
+		t.Fatal("同名软删除账号应走复活分支")
+	}
+	if second.ID != first.ID {
+		t.Errorf("复活应沿用旧主键 %d，实际 %d", first.ID, second.ID)
+	}
+
+	got, err := repo.GetByID(ctx, second.ID)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if got.DeletedAt.Valid {
+		t.Error("deleted_at 应被清空")
+	}
+	if got.Password != "new-pwd" {
+		t.Errorf("密码应换成新的，实际 %q", got.Password)
+	}
+	if got.Cookie != "" || got.CookieSecret != "" {
+		t.Errorf("复活应清空 cookie: %q / %q", got.Cookie, got.CookieSecret)
+	}
+	if got.UIDValue() != 0 || got.Nickname != "新昵称" || got.Name != "" || got.ProfileJSON != "" {
+		t.Errorf("平台档案应重置: %+v", got)
+	}
+	if got.Status != model.AccountStatusNew || got.Online || got.FailureCount != 0 || got.NextVerifyAt != nil {
+		t.Errorf("运行状态应重置: status=%q online=%v failures=%d next=%v",
+			got.Status, got.Online, got.FailureCount, got.NextVerifyAt)
+	}
+	if got.LastLoginAt != nil || got.LastVerifiedAt != nil {
+		t.Errorf("时间戳应清空: %+v", got)
+	}
+	if !got.Enabled {
+		t.Error("复活后应处于启用状态")
+	}
+
+	// 复活后能按用户名查到（软删除已撤销）
+	if _, err := repo.GetByUsername(ctx, first.Username); err != nil {
+		t.Errorf("复活后应能按用户名查到: %v", err)
+	}
+
+	// 再建一次同名：这次是"存在且未删除"，必须是真冲突
+	again := &model.Account{Username: first.Username, Password: "x", Enabled: true}
+	if _, err := repo.Create(ctx, again); !errors.Is(err, model.ErrAccountExists) {
+		t.Errorf("同名且未删除应报 ErrAccountExists，得到 %v", err)
 	}
 }
 
@@ -150,6 +230,7 @@ func TestAccountListDueForVerifyFilters(t *testing.T) {
 	past := now.Add(-time.Hour)
 	future := now.Add(time.Hour)
 
+	names := map[uint]string{}
 	mk := func(name, status string, enabled bool, next *time.Time) uint {
 		t.Helper()
 		acc := &model.Account{
@@ -159,9 +240,10 @@ func TestAccountListDueForVerifyFilters(t *testing.T) {
 			Status:       status,
 			NextVerifyAt: next,
 		}
-		if err := repo.Create(ctx, acc); err != nil {
+		if _, err := repo.Create(ctx, acc); err != nil {
 			t.Fatalf("Create(%s): %v", name, err)
 		}
+		names[acc.ID] = name
 		return acc.ID
 	}
 
@@ -174,6 +256,7 @@ func TestAccountListDueForVerifyFilters(t *testing.T) {
 	wantSkipped := []uint{
 		mk("active-future", model.AccountStatusActive, true, &future), // 还没到期
 		mk("disabled", model.AccountStatusDisabled, true, nil),        // 只能人工恢复
+		mk("banned", model.AccountStatusBanned, true, nil),            // 封禁不自动重试
 		mk("disabled-flag", model.AccountStatusActive, false, nil),    // enabled=false
 	}
 
@@ -191,12 +274,13 @@ func TestAccountListDueForVerifyFilters(t *testing.T) {
 
 	for _, id := range wantDue {
 		if !got[id] {
-			t.Errorf("到期账号 %d 未被捞出", id)
+			t.Errorf("到期的账号 %s(id=%d) 未被捞出", names[id], id)
 		}
 	}
 	for _, id := range wantSkipped {
 		if got[id] {
-			t.Errorf("不该捞出的账号 %d 出现在结果里", id)
+			t.Errorf("不该捞出的账号 %s(id=%d) 出现在结果里 status=%s enabled=%v next=%v",
+				names[id], id, rowStatus(repo, id), rowEnabled(repo, id), rowNext(repo, id))
 		}
 	}
 
@@ -209,12 +293,87 @@ func TestAccountListDueForVerifyFilters(t *testing.T) {
 	}
 }
 
+// rowStatus / rowEnabled / rowNext 仅在用例失败时用来打印被误捞账号的真实字段
+func rowStatus(repo *testRepo, id uint) string {
+	acc, err := repo.GetByID(context.Background(), id)
+	if err != nil {
+		return "?"
+	}
+	return acc.Status
+}
+
+func rowEnabled(repo *testRepo, id uint) bool {
+	acc, err := repo.GetByID(context.Background(), id)
+	return err == nil && acc.Enabled
+}
+
+func rowNext(repo *testRepo, id uint) string {
+	acc, err := repo.GetByID(context.Background(), id)
+	if err != nil || acc.NextVerifyAt == nil {
+		return "<nil>"
+	}
+	return acc.NextVerifyAt.Format(time.RFC3339)
+}
+
+// disabled / banned 账号不参与启动预热（否则封禁号会一直被重登）
+func TestAccountListActiveSkipsInactiveStatuses(t *testing.T) {
+	repo, _ := newRepo(t)
+	ctx := context.Background()
+
+	names := map[uint]string{}
+	mk := func(name, status string, enabled bool) uint {
+		t.Helper()
+		acc := &model.Account{Username: repo.username(name), Password: "pwd", Enabled: enabled, Status: status}
+		if _, err := repo.Create(ctx, acc); err != nil {
+			t.Fatalf("Create(%s): %v", name, err)
+		}
+		names[acc.ID] = name
+		return acc.ID
+	}
+
+	wantActive := []uint{
+		mk("active", model.AccountStatusActive, true),
+		mk("new", model.AccountStatusNew, true),
+		mk("pending", model.AccountStatusReloginPending, true),
+		mk("failed", model.AccountStatusReloginFailed, true),
+	}
+	wantSkipped := []uint{
+		mk("disabled", model.AccountStatusDisabled, true),
+		mk("banned", model.AccountStatusBanned, true),
+		mk("disabled-flag", model.AccountStatusActive, false),
+	}
+
+	rows, err := repo.ListActive(ctx)
+	if err != nil {
+		t.Fatalf("ListActive: %v", err)
+	}
+
+	got := map[uint]bool{}
+	for _, row := range rows {
+		if strings.HasPrefix(row.Username, repo.prefix) {
+			got[row.ID] = true
+		}
+	}
+
+	for _, id := range wantActive {
+		if !got[id] {
+			t.Errorf("账号 %s(id=%d) 应参与号池", names[id], id)
+		}
+	}
+	for _, id := range wantSkipped {
+		if got[id] {
+			t.Errorf("账号 %s(id=%d) 不应参与号池 status=%s enabled=%v",
+				names[id], id, rowStatus(repo, id), rowEnabled(repo, id))
+		}
+	}
+}
+
 func TestAccountSaveSessionThenSelectiveUpdates(t *testing.T) {
 	repo, _ := newRepo(t)
 	ctx := context.Background()
 
 	acc := &model.Account{Username: repo.username("session"), Password: "pwd", Enabled: true}
-	if err := repo.Create(ctx, acc); err != nil {
+	if _, err := repo.Create(ctx, acc); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -301,7 +460,7 @@ func TestAccountUpdatePoolStateAndSoftDelete(t *testing.T) {
 	ctx := context.Background()
 
 	acc := &model.Account{Username: repo.username("state"), Password: "pwd", Enabled: true}
-	if err := repo.Create(ctx, acc); err != nil {
+	if _, err := repo.Create(ctx, acc); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -347,7 +506,7 @@ func TestAccountWrongKeyFailsLoudly(t *testing.T) {
 	ctx := context.Background()
 
 	acc := &model.Account{Username: repo.username("key"), Password: "pwd", Enabled: true}
-	if err := repo.Create(ctx, acc); err != nil {
+	if _, err := repo.Create(ctx, acc); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 

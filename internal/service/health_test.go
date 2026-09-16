@@ -34,9 +34,10 @@ func okPool(online int) stubPool {
 
 func TestCheckAllOK(t *testing.T) {
 	svc := NewHealthService(stubPinger{}, stubPool{stats: client.Stats{
-		Total:          3,
+		Total:          4,
 		Online:         2,
 		ReloginPending: 1,
+		Banned:         1,
 		LastSweepAt:    time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC),
 	}})
 
@@ -48,8 +49,11 @@ func TestCheckAllOK(t *testing.T) {
 	if report.Luogu.Status != StatusAuthenticated {
 		t.Errorf("Luogu.Status = %q", report.Luogu.Status)
 	}
-	if report.Luogu.Total != 3 || report.Luogu.Online != 2 || report.Luogu.ReloginPending != 1 {
+	if report.Luogu.Total != 4 || report.Luogu.Online != 2 || report.Luogu.ReloginPending != 1 {
 		t.Errorf("Luogu = %+v", report.Luogu)
+	}
+	if report.Luogu.Banned != 1 {
+		t.Errorf("Luogu.Banned = %d, want 1", report.Luogu.Banned)
 	}
 	if report.Luogu.LastSweepAt != "2026-03-01T12:00:00Z" {
 		t.Errorf("LastSweepAt = %q", report.Luogu.LastSweepAt)

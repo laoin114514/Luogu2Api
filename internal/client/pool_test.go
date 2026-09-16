@@ -63,7 +63,7 @@ func (s *fakeStore) ListActive(context.Context) ([]*model.Account, error) {
 
 	out := make([]*model.Account, 0, len(s.accounts))
 	for _, acc := range s.accounts {
-		if acc.Enabled && acc.Status != model.AccountStatusDisabled {
+		if acc.Enabled && acc.Status != model.AccountStatusDisabled && acc.Status != model.AccountStatusBanned {
 			out = append(out, acc)
 		}
 	}
@@ -196,6 +196,7 @@ type fakeSession struct {
 	uid    int
 
 	verifyErr  error
+	verifyErrs []error // 按调用顺序返回；用完后回落到 verifyErr（重登成功后还会复核一次）
 	csrfErr    error
 	captchaErr error
 	captcha    []byte
@@ -255,8 +256,14 @@ func (f *fakeSession) LoginCount() int {
 
 func (f *fakeSession) Verify() error {
 	f.mu.Lock()
+	defer f.mu.Unlock()
+
 	f.verifyHits++
-	f.mu.Unlock()
+	if len(f.verifyErrs) > 0 {
+		err := f.verifyErrs[0]
+		f.verifyErrs = f.verifyErrs[1:]
+		return err
+	}
 	return f.verifyErr
 }
 
@@ -399,6 +406,11 @@ func unauthorizedErr() error {
 	return &sdk.UnauthorizedError{StatusCode: 401, Message: "verify auth"}
 }
 
+// 洛谷对封禁账号的表现：登录能成功，但一切请求返回 403
+func forbiddenErr() error {
+	return &sdk.UnauthorizedError{StatusCode: 403, Message: "verify auth"}
+}
+
 // ---------- 预热 ----------
 
 func TestWarmupSeparatesServingAndPending(t *testing.T) {
@@ -496,10 +508,11 @@ func TestSweepVerifyOKPostponesNextVerify(t *testing.T) {
 func TestSweepUnauthorizedReloginsAndReturnsToPool(t *testing.T) {
 	acc := activeAccount(1, "u1", "cookie-1")
 	session := &fakeSession{
-		cookie:    "cookie-1",
-		uid:       1965145,
-		verifyErr: unauthorizedErr(),
-		profile:   model.LuoguProfile{Name: "昵称", RawJSON: `{"uid":1965145}`},
+		cookie: "cookie-1",
+		uid:    1965145,
+		// 第一次验证 401（cookie 失效），重登成功后的复核正常——真实场景就是这样
+		verifyErrs: []error{unauthorizedErr()},
+		profile:    model.LuoguProfile{Name: "昵称", RawJSON: `{"uid":1965145}`},
 	}
 
 	f := newFixture(t, true, []*model.Account{acc}, map[uint]*fakeSession{1: session})
@@ -849,6 +862,8 @@ func TestClassify(t *testing.T) {
 		{"nil", nil, clsOK},
 		{"unauthorized", unauthorizedErr(), clsUnauthorized},
 		{"unauthorized-wrapped", fmt.Errorf("获取题目 P1001: %w", unauthorizedErr()), clsUnauthorized},
+		{"forbidden", forbiddenErr(), clsForbidden},
+		{"forbidden-wrapped", fmt.Errorf("获取题目 P1001: %w", forbiddenErr()), clsForbidden},
 		{"captcha", captchaErr(), clsCaptcha},
 		{"password", &sdk.AuthError{Type: "InvalidPasswordException"}, clsFatal},
 		{"network", &sdk.NetworkError{Err: errors.New("timeout")}, clsTransient},
@@ -862,6 +877,14 @@ func TestClassify(t *testing.T) {
 				t.Errorf("classify(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
+	}
+
+	// 日志可读性：401 与 403 要能一眼区分
+	if clsUnauthorized.String() == clsForbidden.String() {
+		t.Error("401 与 403 的类别名不应相同")
+	}
+	if clsForbidden.String() != "forbidden_403" {
+		t.Errorf("clsForbidden.String() = %q", clsForbidden.String())
 	}
 }
 
@@ -898,6 +921,183 @@ func TestSummarizeKeepsSingleLineAndLimitsLength(t *testing.T) {
 	}
 	if summarize(nil) != "" {
 		t.Error("nil 错误应得到空摘要")
+	}
+}
+
+// ---------- 扫描：封禁账号（登录能成功但一切 403）----------
+
+// 洛谷封禁账号的实测表现：登录返回成功、cookie 正常签发，但 /user/setting 与
+// /user/{uid} 全部 403。这类账号必须判为 banned 并退出自动重试，
+// 否则会陷入"验证 403 → 重登成功 → 再验证 403"的死循环。
+func TestSweepForbiddenMarksAccountBanned(t *testing.T) {
+	acc := activeAccount(1, "laoyin", "cookie-banned")
+	session := &fakeSession{
+		cookie:    "cookie-banned",
+		uid:       1851093,
+		verifyErr: forbiddenErr(), // 登录前后都是 403
+	}
+
+	f := newFixture(t, true, []*model.Account{acc}, map[uint]*fakeSession{1: session})
+	if _, err := f.pool.Warmup(context.Background()); err != nil {
+		t.Fatalf("Warmup: %v", err)
+	}
+
+	res, err := f.pool.Sweep(context.Background())
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	if res.Banned != 1 || res.Relogged != 0 || res.OK != 0 {
+		t.Errorf("SweepResult = %+v", res)
+	}
+	// 登录确实被调过一次（用凭据复核），但只此一次
+	if session.LoginCount() != 1 {
+		t.Errorf("登录次数 = %d, want 1", session.LoginCount())
+	}
+
+	last, ok := f.store.lastState()
+	if !ok {
+		t.Fatal("应写入状态")
+	}
+	if last.state.Status != model.AccountStatusBanned || last.state.Online {
+		t.Errorf("最终状态 = %+v", last.state)
+	}
+	// 封禁不是重试能解决的问题：不排下次验证，也不再累加失败次数
+	if last.state.NextVerifyAt != nil {
+		t.Errorf("banned 不应排下次验证: %v", last.state.NextVerifyAt)
+	}
+	if last.state.FailureCount != 0 {
+		t.Errorf("FailureCount = %d, want 0", last.state.FailureCount)
+	}
+	if f.store.savedCount() != 0 {
+		t.Error("封禁账号不该把 cookie 当作有效登录态保存")
+	}
+	if f.pool.getSession(1).isServing() {
+		t.Error("封禁账号必须退出服务集")
+	}
+	if stats := f.pool.Stats(); stats.Banned != 1 || stats.Online != 0 {
+		t.Errorf("Stats = %+v", stats)
+	}
+}
+
+// 封禁后不再被扫描（否则每轮都会重登一次）
+func TestBannedAccountIsNotSweptAgain(t *testing.T) {
+	acc := activeAccount(1, "laoyin", "cookie-banned")
+	session := &fakeSession{cookie: "cookie-banned", verifyErr: forbiddenErr()}
+
+	f := newFixture(t, true, []*model.Account{acc}, map[uint]*fakeSession{1: session})
+	if _, err := f.pool.Warmup(context.Background()); err != nil {
+		t.Fatalf("Warmup: %v", err)
+	}
+	if _, err := f.pool.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	// 第二轮：仓储层按状态过滤，banned 不在可扫描状态里
+	f.store.due = nil
+	res, err := f.pool.Sweep(context.Background())
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if res.Checked != 0 {
+		t.Errorf("banned 账号不应再被扫描: %+v", res)
+	}
+	if session.LoginCount() != 1 {
+		t.Errorf("不应重复登录，实际 %d 次", session.LoginCount())
+	}
+
+	// 仓储层的过滤条件也必须是"排除 banned"
+	for _, status := range model.AccountSweepableStatuses {
+		if status == model.AccountStatusBanned {
+			t.Error("banned 不应出现在可扫描状态集合里")
+		}
+	}
+}
+
+// 登录成功但复核遇到网络抖动：不能丢掉这次成功的登录
+func TestReloginTransientVerifyKeepsAccountAlive(t *testing.T) {
+	acc := activeAccount(1, "u1", "cookie-1")
+	session := &fakeSession{
+		cookie:     "cookie-1",
+		uid:        1965145,
+		verifyErrs: []error{unauthorizedErr(), &sdk.NetworkError{Err: errors.New("i/o timeout")}},
+	}
+
+	f := newFixture(t, true, []*model.Account{acc}, map[uint]*fakeSession{1: session})
+	if _, err := f.pool.Warmup(context.Background()); err != nil {
+		t.Fatalf("Warmup: %v", err)
+	}
+
+	res, err := f.pool.Sweep(context.Background())
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	if res.Relogged != 1 {
+		t.Errorf("SweepResult = %+v", res)
+	}
+	if got := f.pool.Stats().Online; got != 1 {
+		t.Errorf("Online = %d, want 1（登录成功不该因为复核失败而作废）", got)
+	}
+}
+
+// 登录成功后复核仍是 401：不改状态定性，留给下一轮
+func TestReloginUnauthorizedVerifyGoesPending(t *testing.T) {
+	acc := activeAccount(1, "u1", "cookie-1")
+	session := &fakeSession{
+		cookie:     "cookie-1",
+		verifyErrs: []error{unauthorizedErr(), unauthorizedErr()},
+	}
+
+	f := newFixture(t, true, []*model.Account{acc}, map[uint]*fakeSession{1: session})
+	if _, err := f.pool.Warmup(context.Background()); err != nil {
+		t.Fatalf("Warmup: %v", err)
+	}
+
+	res, err := f.pool.Sweep(context.Background())
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if res.Pending != 1 || res.Relogged != 0 {
+		t.Errorf("SweepResult = %+v", res)
+	}
+
+	last, _ := f.store.lastState()
+	if last.state.Status != model.AccountStatusReloginPending {
+		t.Errorf("状态 = %q, want %q", last.state.Status, model.AccountStatusReloginPending)
+	}
+}
+
+// 请求路径遇到 403：换号继续服务，不把请求打回去
+func TestWithSessionFailsOverOnForbidden(t *testing.T) {
+	acc1 := activeAccount(1, "u1", "cookie-1")
+	acc2 := activeAccount(2, "u2", "cookie-2")
+
+	f := newFixture(t, false, []*model.Account{acc1, acc2}, map[uint]*fakeSession{
+		1: {cookie: "cookie-1", verifyErr: forbiddenErr()},
+		2: {cookie: "cookie-2"},
+	})
+	if _, err := f.pool.Warmup(context.Background()); err != nil {
+		t.Fatalf("Warmup: %v", err)
+	}
+
+	var served []uint
+	err := f.pool.withSession(context.Background(), "测试请求", func(c SessionClient) error {
+		s := c.(*fakeSession)
+		served = append(served, uint(len(s.cookie)))
+		if s.cookie == "cookie-1" {
+			return forbiddenErr()
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("403 应换号重试并成功: %v", err)
+	}
+	if len(served) != 2 {
+		t.Errorf("应尝试两个账号，实际 %v", served)
+	}
+	if f.pool.getSession(1).isServing() {
+		t.Error("403 的账号应立刻摘出服务集")
 	}
 }
 
@@ -968,15 +1168,19 @@ func TestStatsCountsDisabledAndPending(t *testing.T) {
 	acc2.Status = model.AccountStatusReloginFailed
 	acc3 := activeAccount(3, "u3", "cookie-3")
 	acc3.Status = model.AccountStatusDisabled
+	acc4 := activeAccount(4, "u4", "cookie-4")
+	acc4.Online = false
+	acc4.Status = model.AccountStatusBanned
 
-	f := newFixture(t, false, []*model.Account{acc1, acc2, acc3}, map[uint]*fakeSession{
+	f := newFixture(t, false, []*model.Account{acc1, acc2, acc3, acc4}, map[uint]*fakeSession{
 		1: {cookie: "cookie-1"},
 		2: {cookie: "cookie-2"},
 		3: {cookie: "cookie-3"},
+		4: {cookie: "cookie-4"},
 	})
 
-	// disabled 账号会被 ListActive 过滤掉，用 Load 直接塞进池来验证计数
-	for _, acc := range []*model.Account{acc1, acc2, acc3} {
+	// disabled/banned 账号会被 ListActive 过滤掉，用 buildSession 直接塞进池来验证计数
+	for _, acc := range []*model.Account{acc1, acc2, acc3, acc4} {
 		s, err := f.pool.buildSession(acc)
 		if err != nil {
 			t.Fatalf("buildSession: %v", err)
@@ -985,7 +1189,7 @@ func TestStatsCountsDisabledAndPending(t *testing.T) {
 	}
 
 	stats := f.pool.Stats()
-	if stats.Total != 3 || stats.Online != 1 || stats.ReloginFailed != 1 || stats.Disabled != 1 {
+	if stats.Total != 4 || stats.Online != 1 || stats.ReloginFailed != 1 || stats.Disabled != 1 || stats.Banned != 1 {
 		t.Errorf("Stats = %+v", stats)
 	}
 }

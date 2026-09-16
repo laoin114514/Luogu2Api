@@ -47,6 +47,7 @@ type LuoguStatus struct {
 	ReloginPending int    `json:"reloginPending"`
 	ReloginFailed  int    `json:"reloginFailed"`
 	Disabled       int    `json:"disabled"`
+	Banned         int    `json:"banned"`
 	LastSweepAt    string `json:"lastSweepAt,omitempty"`
 }
 
@@ -109,6 +110,7 @@ func (s *HealthService) checkPool() LuoguStatus {
 		ReloginPending: stats.ReloginPending,
 		ReloginFailed:  stats.ReloginFailed,
 		Disabled:       stats.Disabled,
+		Banned:         stats.Banned,
 	}
 	if !stats.LastSweepAt.IsZero() {
 		out.LastSweepAt = stats.LastSweepAt.UTC().Format(time.RFC3339)

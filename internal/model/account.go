@@ -21,14 +21,27 @@ const (
 	AccountStatusReloginFailed = "relogin_failed"
 	// AccountStatusDisabled 凭据/账号级问题或人工停用，不再自动重试
 	AccountStatusDisabled = "disabled"
+	// AccountStatusBanned 洛谷封禁/限制：账号密码仍能登录，但所有接口都返回 403。
+	// 这种账号自动重登只会无限循环（登录成功 → 又被 403），因此同样退出自动重试，
+	// 等人工处理（解封后用 PATCH enabled=true 重新入池验证）。
+	AccountStatusBanned = "banned"
 )
 
-// AccountSweepableStatuses 定时任务会去验证/重登的状态集合（disabled 只能人工恢复）
+// AccountSweepableStatuses 定时任务会去验证/重登的状态集合。
+//
+// disabled / banned 只能人工恢复，不在扫描范围内——否则封禁账号会陷入
+// "验证 403 → 重登成功 → 再验证 403" 的死循环。
 var AccountSweepableStatuses = []string{
 	AccountStatusNew,
 	AccountStatusActive,
 	AccountStatusReloginPending,
 	AccountStatusReloginFailed,
+}
+
+// AccountInactiveStatuses 不参与号池的状态（启动预热与选号都跳过）
+var AccountInactiveStatuses = []string{
+	AccountStatusDisabled,
+	AccountStatusBanned,
 }
 
 // PoolState 号池运行状态的更新内容（不含 cookie 与平台档案）
@@ -78,14 +91,16 @@ type Account struct {
 
 	// --- 号池运行状态 ---
 	// LuoguUID 可空：唯一索引允许多个 NULL，但不允许重复的 0，因此未登录时必须为 NULL
-	LuoguUID       *int64     `gorm:"column:luogu_uid;uniqueIndex:uk_account_luogu_uid;comment:洛谷 UID，未登录为 NULL"`
-	Nickname       string     `gorm:"column:nickname;type:varchar(64);not null;default:'';comment:昵称"`
-	Online         bool       `gorm:"column:online;not null;default:false;index:idx_account_online;comment:是否可被请求选中"`
-	Status         string     `gorm:"column:status;type:varchar(24);not null;default:'new';index:idx_account_status"`
-	FailureCount   int32      `gorm:"column:failure_count;not null;default:0;comment:连续重登失败的轮数"`
-	LastError      string     `gorm:"column:last_error;type:varchar(512);not null;default:'';comment:最近一次错误摘要（不含凭据）"`
-	Enabled        bool       `gorm:"column:enabled;not null;default:true;comment:人工启停开关"`
-	Weight         int32      `gorm:"column:weight;not null;default:1;comment:预留的加权轮询权重"`
+	LuoguUID     *int64 `gorm:"column:luogu_uid;uniqueIndex:uk_account_luogu_uid;comment:洛谷 UID，未登录为 NULL"`
+	Nickname     string `gorm:"column:nickname;type:varchar(64);not null;default:'';comment:昵称"`
+	Online       bool   `gorm:"column:online;not null;default:false;index:idx_account_online;comment:是否可被请求选中"`
+	Status       string `gorm:"column:status;type:varchar(24);not null;default:'new';index:idx_account_status"`
+	FailureCount int32  `gorm:"column:failure_count;not null;default:0;comment:连续重登失败的轮数"`
+	LastError    string `gorm:"column:last_error;type:varchar(512);not null;default:'';comment:最近一次错误摘要（不含凭据）"`
+	// Enabled / Weight 刻意不写 default：GORM 在 INSERT 时会跳过"带 default 的零值字段"，
+	// 一旦写成 default:true/1，就永远建不出 enabled=false 的账号（会被数据库默认值覆盖）。
+	Enabled        bool       `gorm:"column:enabled;not null;comment:人工启停开关"`
+	Weight         int32      `gorm:"column:weight;not null;comment:预留的加权轮询权重"`
 	NextVerifyAt   *time.Time `gorm:"column:next_verify_at;index:idx_account_next_verify;comment:到期验证时间"`
 	LastLoginAt    *time.Time `gorm:"column:last_login_at"`
 	LastVerifiedAt *time.Time `gorm:"column:last_verified_at"`

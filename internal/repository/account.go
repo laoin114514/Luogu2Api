@@ -29,19 +29,23 @@ func NewAccountRepository(db *gorm.DB, cipher *secret.Cipher) *AccountRepository
 	return &AccountRepository{db: db, cipher: cipher}
 }
 
-// Create 插入账号（密码/可选 cookie，写入前加密）
-func (r *AccountRepository) Create(ctx context.Context, acc *model.Account) error {
+// Create 插入账号（密码/可选 cookie，写入前加密）。
+//
+// 若同名账号此前被"软删除"，则原地复活它而不是报冲突：重置凭据与运行状态、
+// 清空 cookie/UID/平台档案，让它像新账号一样重新登录（主键沿用旧行）。
+// 返回值 revived 表示走的是复活分支，调用方据此打出更准确的日志。
+func (r *AccountRepository) Create(ctx context.Context, acc *model.Account) (revived bool, err error) {
 	if acc == nil {
-		return errors.New("repository: acc 不能为 nil")
+		return false, errors.New("repository: acc 不能为 nil")
 	}
 
 	password, err := r.cipher.Seal(acc.Password)
 	if err != nil {
-		return fmt.Errorf("加密密码失败: %w", err)
+		return false, fmt.Errorf("加密密码失败: %w", err)
 	}
 	cookie, err := r.cipher.Seal(acc.Cookie)
 	if err != nil {
-		return fmt.Errorf("加密 cookie 失败: %w", err)
+		return false, fmt.Errorf("加密 cookie 失败: %w", err)
 	}
 
 	row := *acc
@@ -51,11 +55,24 @@ func (r *AccountRepository) Create(ctx context.Context, acc *model.Account) erro
 		row.Status = model.AccountStatusNew
 	}
 
+	// 先看有没有"同名但已软删除"的行：有就复活它。
+	// 刻意放在 INSERT 之前——否则每次复活都要先撞一次唯一键冲突，
+	// 数据库日志里会留下一条看着像故障的 "duplicated key not allowed"。
+	revived, err = r.reviveSoftDeleted(ctx, acc, password)
+	if err != nil {
+		return false, err
+	}
+	if revived {
+		return true, nil
+	}
+
 	if err := r.db.WithContext(ctx).Create(&row).Error; err != nil {
-		if errors.Is(err, gorm.ErrDuplicatedKey) {
-			return fmt.Errorf("%w: %s", model.ErrAccountExists, acc.Username)
+		if !errors.Is(err, gorm.ErrDuplicatedKey) {
+			return false, fmt.Errorf("创建账号失败: %w", err)
 		}
-		return fmt.Errorf("创建账号失败: %w", err)
+		// 走到这里说明同名账号还在用（或 uid 撞了），是真冲突；
+		// 并发下"别人刚复活/刚插入"也会落到这里，属于预期结果。
+		return false, fmt.Errorf("%w: %s", model.ErrAccountExists, acc.Username)
 	}
 
 	// 回填自增主键与时间戳，供调用方继续使用同一个对象
@@ -63,7 +80,87 @@ func (r *AccountRepository) Create(ctx context.Context, acc *model.Account) erro
 	acc.Status = row.Status
 	acc.CreatedAt = row.CreatedAt
 	acc.UpdatedAt = row.UpdatedAt
-	return nil
+	// 让调用方手上的对象与落库结果一致（明文仍只在 acc.Password / acc.Cookie）
+	acc.PasswordSecret = password
+	acc.CookieSecret = cookie
+	return false, nil
+}
+
+// reviveSoftDeleted 若存在"同名且已软删除"的行，则原地复活它并返回 true。
+//
+// 整体重置成"刚导入"的状态：新密码、cookie/UID/平台档案清空、状态回到 new、
+// online 归零并清掉退避与错误，最后把 deleted_at 置空。这样删号重建既不会撞
+// username 唯一键，也不会把上一轮的封禁/停用/失败计数带过来。
+// created_at 保留旧值（这行确实存在了很久），调用方如需展示可自行说明。
+func (r *AccountRepository) reviveSoftDeleted(ctx context.Context, acc *model.Account, passwordSecret string) (bool, error) {
+	var row model.Account
+	err := r.db.WithContext(ctx).Unscoped().
+		Where("username = ?", acc.Username).
+		First(&row).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return false, nil // 没有同名的历史行
+		}
+		return false, fmt.Errorf("查询同名账号失败: %w", err)
+	}
+	if !row.DeletedAt.Valid {
+		return false, nil // 同名且仍在用 → 交给 INSERT 去报真冲突
+	}
+
+	nickname := acc.Nickname
+	updates := map[string]any{
+		"password_enc":      passwordSecret,
+		"cookie_enc":        nil,
+		"luogu_uid":         nil,
+		"nickname":          nickname,
+		"status":            model.AccountStatusNew,
+		"online":            false,
+		"failure_count":     0,
+		"last_error":        "",
+		"enabled":           true,
+		"weight":            1,
+		"next_verify_at":    nil,
+		"last_login_at":     nil,
+		"last_verified_at":  nil,
+		"cookie_updated_at": nil,
+		"name":              "",
+		"avatar":            "",
+		"slogan":            "",
+		"badge":             "",
+		"color":             "",
+		"is_admin":          false,
+		"is_banned":         false,
+		"ccf_level":         0,
+		"xcpc_level":        0,
+		"background":        "",
+		"profile_json":      "",
+		"deleted_at":        nil,
+	}
+
+	res := r.db.WithContext(ctx).Unscoped().
+		Model(&model.Account{}).
+		Where("id = ? AND deleted_at IS NOT NULL", row.ID).
+		Updates(updates)
+	if res.Error != nil {
+		return false, fmt.Errorf("复活同名账号失败: %w", res.Error)
+	}
+	if res.RowsAffected == 0 {
+		return false, nil // 并发下已被别人复活/重建 → 按冲突处理
+	}
+
+	acc.ID = row.ID
+	acc.Status = model.AccountStatusNew
+	acc.Enabled = true
+	acc.Weight = 1
+	acc.Online = false
+	acc.FailureCount = 0
+	acc.LastError = ""
+	acc.NextVerifyAt = nil
+	acc.LuoguUID = nil
+	acc.CookieSecret = ""
+	acc.PasswordSecret = passwordSecret
+	acc.CreatedAt = row.CreatedAt
+	return true, nil
 }
 
 // GetByID 按主键读取（含解密后的凭据）
@@ -110,13 +207,13 @@ func (r *AccountRepository) ListAll(ctx context.Context) ([]*model.Account, erro
 	return rows, nil
 }
 
-// ListActive 列出需要进入号池的账号（启用且非 disabled）。
+// ListActive 列出需要进入号池的账号（启用且非 disabled/banned）。
 //
 // 启动预热使用：即使 cookie 为空/无效也会返回，由号池标记为待重登。
 func (r *AccountRepository) ListActive(ctx context.Context) ([]*model.Account, error) {
 	var rows []*model.Account
 	err := r.db.WithContext(ctx).
-		Where("enabled = ? AND status <> ?", true, model.AccountStatusDisabled).
+		Where("enabled = ? AND status NOT IN ?", true, model.AccountInactiveStatuses).
 		Order("id ASC").
 		Find(&rows).Error
 	if err != nil {
@@ -140,11 +237,14 @@ func (r *AccountRepository) ListDueForVerify(ctx context.Context, now time.Time,
 		limit = 1
 	}
 
+	// 注意必须给 OR 加括号：GORM 拼接多个 Where 时不会自动加括号，
+	// 否则会变成 (enabled AND status IN (...) AND next_verify_at IS NULL) OR next_verify_at <= ?
+	// ——后半段不带任何过滤条件，会把停用/封禁账号也一起捞出来。
 	var rows []*model.Account
 	err := r.db.WithContext(ctx).
 		Where("enabled = ?", true).
 		Where("status IN ?", model.AccountSweepableStatuses).
-		Where("next_verify_at IS NULL OR next_verify_at <= ?", now).
+		Where("(next_verify_at IS NULL OR next_verify_at <= ?)", now).
 		Order("next_verify_at IS NULL DESC, next_verify_at ASC, id ASC").
 		Limit(limit).
 		Find(&rows).Error

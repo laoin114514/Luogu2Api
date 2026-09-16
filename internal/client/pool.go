@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -53,6 +54,7 @@ const (
 	outcomeReloginFailed                       // 尝试次数用尽 → relogin_failed + 离线
 	outcomePending                             // 环境原因（OCR/网络）→ relogin_pending + 离线
 	outcomeDisabled                            // 凭据/账号级问题 → disabled
+	outcomeBanned                              // 登录能用但被 403 拒绝 → banned
 	outcomeTransient                           // 连 cookie 有效性都无法确认 → 不改 online/status
 	outcomeBusy                                // 已有重登在进行 → 本轮跳过，不写库
 )
@@ -62,11 +64,30 @@ type errClass int
 
 const (
 	clsOK           errClass = iota
-	clsUnauthorized          // cookie 失效
+	clsUnauthorized          // 401：cookie 失效
+	clsForbidden             // 403：凭据没问题但拒绝访问（洛谷封禁/限制账号的典型表现）
 	clsCaptcha               // 验证码识别错（可换一张重试）
 	clsFatal                 // 凭据/账号级问题
 	clsTransient             // 网络/5xx/OCR/未知：与 cookie 无关，绝不动账号状态
 )
+
+// String 便于日志里直接说明错误类别（401 还是 403 会决定账号的处置方式）
+func (c errClass) String() string {
+	switch c {
+	case clsOK:
+		return "ok"
+	case clsUnauthorized:
+		return "unauthorized_401"
+	case clsForbidden:
+		return "forbidden_403"
+	case clsCaptcha:
+		return "captcha"
+	case clsFatal:
+		return "fatal"
+	default:
+		return "transient"
+	}
+}
 
 // SweepResult 一轮扫描的统计
 type SweepResult struct {
@@ -77,6 +98,7 @@ type SweepResult struct {
 	Declared  int       `json:"declared"`
 	Pending   int       `json:"pending"`
 	Disabled  int       `json:"disabled"`
+	Banned    int       `json:"banned"`
 	Transient int       `json:"transient"`
 	Busy      int       `json:"busy"`
 	// Duration 以纳秒输出（time.Duration 的 JSON 形式），字段名随之写实
@@ -90,6 +112,7 @@ type Stats struct {
 	ReloginPending int          `json:"reloginPending"`
 	ReloginFailed  int          `json:"reloginFailed"`
 	Disabled       int          `json:"disabled"`
+	Banned         int          `json:"banned"`
 	LastSweepAt    time.Time    `json:"lastSweepAt"`
 	LastSweep      *SweepResult `json:"lastSweep,omitempty"`
 }
@@ -224,6 +247,8 @@ func (p *Pool) Stats() Stats {
 	for _, s := range sessions {
 		acc := s.snapshot()
 		switch {
+		case acc.Status == model.AccountStatusBanned:
+			stats.Banned++
 		case acc.Status == model.AccountStatusDisabled || !acc.Enabled:
 			stats.Disabled++
 		case acc.Online && acc.Status == model.AccountStatusActive:
@@ -287,6 +312,8 @@ func (p *Pool) Sweep(ctx context.Context) (SweepResult, error) {
 				res.Pending++
 			case outcomeDisabled:
 				res.Disabled++
+			case outcomeBanned:
+				res.Banned++
 			case outcomeBusy:
 				res.Busy++
 			default:
@@ -329,10 +356,13 @@ func (p *Pool) handleAccount(ctx context.Context, acc *model.Account) accountOut
 		s.markAlive(now)
 		return outcomeOK
 
-	case clsUnauthorized:
-		// cookie 确认失效：先落库摘池（crash-safe），再同步重登
-		p.logger.Warn("账号登录态失效，已摘出号池",
-			"account_id", s.id, "username", s.username, "err", summarize(verifyErr))
+	case clsUnauthorized, clsForbidden:
+		// 401：cookie 确认失效；403：凭据没错但被拒（封禁账号的典型表现）。
+		// 两者都先落库摘池（crash-safe），再同步重登——403 的具体定性交给
+		// 重登成功后的复核（那里才会看到"登录成功但依然 403"）。
+		p.logger.Warn("账号登录态不可用，已摘出号池",
+			"account_id", s.id, "username", s.username,
+			"class", classify(verifyErr).String(), "err", summarize(verifyErr))
 		p.markOffline(ctx, s, model.AccountStatusReloginPending, acc.FailureCount, verifyErr,
 			timePtr(p.now().Add(p.cfg.Account.LoginBackoff)))
 
@@ -475,11 +505,33 @@ func (p *Pool) completeLogin(ctx context.Context, s *session, acc model.Account)
 	cookie := string(data)
 	uid := c.UID()
 
+	// 登录成功 ≠ 账号可用：洛谷对封禁账号照样签发会话，但随后所有接口都返回 403。
+	// 这里立刻验一次，避免把封禁账号当成在线账号放进池子（也避免"重登成功→403→再重登"
+	// 的死循环）。网络抖动导致的验证失败不算数——登录本身已经成功，状态照常推进。
+	s.mu.RLock()
+	verifyErr := c.Verify()
+	s.mu.RUnlock()
+
+	switch classify(verifyErr) {
+	case clsForbidden:
+		return p.recordBanned(ctx, s, acc,
+			fmt.Errorf("登录成功但所有接口均返回 403（账号被洛谷封禁或限制）: %w", verifyErr))
+	case clsUnauthorized:
+		return p.recordPending(ctx, s, acc,
+			fmt.Errorf("登录成功后仍然未授权，稍后重试: %w", verifyErr))
+	case clsTransient:
+		p.logger.Warn("登录成功但登录态复核未完成（环境原因），按在线处理",
+			"account_id", s.id, "username", s.username, "err", summarize(verifyErr))
+	}
+
 	profile, err := c.UserProfile()
 	if err != nil {
 		// 资料拉取失败不影响登录态本身
 		p.logger.Warn("登录成功但拉取用户资料失败",
 			"account_id", s.id, "username", s.username, "err", summarize(err))
+	}
+	if profile.IsBanned {
+		return p.recordBanned(ctx, s, acc, errors.New("洛谷用户资料显示该账号已被封禁（isBanned=true）"))
 	}
 
 	if err := p.store.SaveSession(ctx, acc.ID, cookie, uid, profile, now, p.nextVerifyAt(now)); err != nil {
@@ -579,6 +631,18 @@ func (p *Pool) recordDisabled(ctx context.Context, s *session, acc model.Account
 	p.logger.Error("账号不可用，已停用（需人工处理：密码错误/账号锁定/二次验证）",
 		"account_id", s.id, "username", s.username, "err", summarize(cause))
 	return outcomeDisabled, cause
+}
+
+// recordBanned 账号被洛谷封禁/限制：登录能成功但所有接口 403。
+//
+// 不累加 failure_count、不排下次验证：重登对封禁账号没有意义，只会白白打洛谷。
+// 解封后由运维用 PATCH enabled=true 复位状态重新入池。
+func (p *Pool) recordBanned(ctx context.Context, s *session, acc model.Account, cause error) (accountOutcome, error) {
+	p.markOffline(ctx, s, model.AccountStatusBanned, acc.FailureCount, cause, nil)
+
+	p.logger.Error("账号已被洛谷封禁/限制，移出号池（需人工处理：解封后重新启用）",
+		"account_id", s.id, "username", s.username, "uid", acc.UIDValue(), "err", summarize(cause))
+	return outcomeBanned, cause
 }
 
 // markOffline 把账号标记为离线并落库（cookie 已确认失效时使用）
@@ -736,11 +800,15 @@ func (p *Pool) withSession(ctx context.Context, op string, fn func(SessionClient
 		}
 		lastErr = callErr
 
-		if classify(callErr) == clsUnauthorized {
+		switch classify(callErr) {
+		case clsUnauthorized, clsForbidden:
+			// 401：cookie 失效；403：账号被封禁/限制。两种都换号重试，
+			// 具体状态交给后台核实（403 会在重登后的复核里被判为 banned）。
 			p.suspend(s, callErr)
-			continue // 换下一个账号
+			continue
+		default:
+			return fmt.Errorf("%s: %w", op, callErr)
 		}
-		return fmt.Errorf("%s: %w", op, callErr)
 	}
 
 	return fmt.Errorf("%s: %w（已尝试 %d 个账号，最后错误: %v）",
@@ -753,7 +821,7 @@ func (p *Pool) Load(ctx context.Context, id uint) error {
 	if err != nil {
 		return err
 	}
-	if !acc.Enabled || acc.Status == model.AccountStatusDisabled {
+	if !acc.Enabled || acc.Status == model.AccountStatusDisabled || acc.Status == model.AccountStatusBanned {
 		p.Remove(id)
 		return nil
 	}
@@ -837,6 +905,9 @@ func (p *Pool) WaitBackground(timeout time.Duration) bool {
 //
 // 除"明确未授权 / 明确凭据错误 / 明确验证码错误"外一律归入 clsTransient：
 // 宁可下一轮重试，也不能因为一次网络抖动把账号标记为不可用。
+//
+// 401 与 403 必须分开：洛谷对"cookie 失效"回 401，对"账号被封禁/限制"回 403
+// （实测：封禁账号能正常登录，但 /user/setting、/user/{uid} 全部 403）。
 func classify(err error) errClass {
 	if err == nil {
 		return clsOK
@@ -848,6 +919,9 @@ func classify(err error) errClass {
 
 	var unauthorized *sdk.UnauthorizedError
 	if errors.As(err, &unauthorized) {
+		if unauthorized.StatusCode == http.StatusForbidden {
+			return clsForbidden
+		}
 		return clsUnauthorized
 	}
 

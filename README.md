@@ -72,11 +72,12 @@ cmd/api ──► router ──► handler ──► service ──► repositor
 
 ### 错误分类决定账号命运（核心设计）
 
-只有**确认 cookie 失效**才会把账号标记为不可用：
+只有**确认 cookie 失效或账号被拒**才会把账号标记为不可用：
 
 | 情况 | 判定 | 处置 |
 |---|---|---|
-| `UnauthorizedError`（401/403/302→login） | cookie 确实失效 | 立即摘出号池并重登 |
+| `401`（cookie 失效/过期、302→登录页） | cookie 确实失效 | 立即摘出号池并重登 |
+| `403`（凭据没问题但被拒绝） | 账号被洛谷**封禁/限制** | 见下方"封禁识别"，判为 `banned` |
 | 重登时验证码识别错（`CaptchaNotMatchException`） | 换一张还能试 | 换新验证码重试，计入尝试次数 |
 | 网络错误 / 5xx / SDK 解析失败 | **与 cookie 无关** | **绝不改动 online/status**，只记 `last_error` 并短退避 |
 | OCR 服务不可用 | 环境问题，不是账号问题 | 保持 `relogin_pending` + 短退避，**不**升级为失败 |
@@ -86,21 +87,48 @@ cmd/api ──► router ──► handler ──► service ──► repositor
 `online=false` + `status=relogin_failed`，并按 `ACCOUNT_LOGIN_BACKOFF × 2^(n-1)` 退避（上限
 `ACCOUNT_FAILED_RETRY`）慢速重试，而不是每 5 分钟热循环。
 
-状态机：`new → active ⇄ relogin_pending →(尝试用尽) relogin_failed`，`disabled` 不会自动重试。
-人工恢复用 `PATCH /api/v1/admin/accounts/:id {"enabled":true}`：对 `disabled` 账号会把状态复位成
-`new`、清空失败计数与退避，让扫描器重新验证/登录一次（否则修好密码后账号也永远回不了池子）；
-对本来就正常的账号则只做启停，不会打断它的在线状态。
+### 封禁识别（401 vs 403）
+
+实测（2026-09，账号 `laoyin`）：**被封禁的账号照样能用密码登录成功**，登录响应 `locked:false`、
+会话 cookie 也正常签发，但随后**所有**需要登录的接口都返回 `HTTP 403` —— `/user/setting` 403，
+连它自己的公开主页 `/user/{uid}` 也 403，响应体是洛谷正常的应用页（不是 WAF 拦截页）。
+而"cookie 失效"返回的是 `401`。因此判定靠状态码，且必须做**两步确认**，不能凭一次 403 就下结论：
+
+1. 验证返回 `403` → 先按"登录态不可用"摘池，然后正常走一次重登（不改判定）；
+2. 重登**登录成功**后再复核一次登录态：
+   - 仍然 `403` → 凭据刚被接受却依然被拒 ⇒ **`banned`**（洛谷封禁/限制），退出自动重试；
+   - `200` → 恢复 `active`（说明刚才的 403 是瞬时的，自愈）；
+   - 网络类错误 → 按 `active` 处理并下一轮再验（登录已经成功，不因复核失败丢弃它）。
+
+另外登录后拉到的用户资料里 `isBanned=true` 也会直接判为 `banned`（保留的兜底信号；封禁账号
+通常连资料页都 403，取不到这个字段）。`banned` 的账号：`online=false`、不排下次验证、
+不计失败次数、不参与选号，也不会被扫描器重试（否则会陷入"403→重登成功→403"的死循环）。
+
+状态机：`new → active ⇄ relogin_pending →(尝试用尽) relogin_failed`，`disabled` 与 `banned`
+都不会自动重试。人工恢复用 `PATCH /api/v1/admin/accounts/:id {"enabled":true}`：对 `disabled`
+与 `banned` 账号会把状态复位成 `new`、清空失败计数与退避，让扫描器重新验证/登录一次（密码改对了、
+或者封禁解除了，都用这个口子；仍被封禁则会在一轮内重新判回 `banned`）；对本来就正常的账号只做
+启停，不会打断它的在线状态。
 
 ### accounts 表
 
 登录凭据、平台档案、号池运行状态放同一张表（本项目规模下拆表的 join 成本大于收益）：
 
 - 凭据：`username`、`password_enc`、`cookie_enc`（**AES-GCM 密文**，密钥来自 `ACCOUNT_SECRET_KEY`）
-- 运行状态：`online`、`status`、`failure_count`、`last_error`、`next_verify_at`、`last_login_at`、`last_verified_at`、`cookie_updated_at`、`enabled`、`weight`
+- 运行状态：`online`、`status`（`new`/`active`/`relogin_pending`/`relogin_failed`/`disabled`/`banned`）、`failure_count`、`last_error`、`next_verify_at`、`last_login_at`、`last_verified_at`、`cookie_updated_at`、`enabled`、`weight`
 - 洛谷平台用户字段：`luogu_uid`（未登录为 NULL，避免唯一索引冲突）、`nickname`、`name`、`avatar`、`slogan`、`badge`、`color`、`is_admin`、`is_banned`、`ccf_level`、`xcpc_level`、`background`、`profile_json`（原始 JSON 快照，便于以后扩展字段）
 
 写入一律走列级 `Updates(map)`：扫描器与请求路径会并发改同一行，整行 `Save` 会丢更新。
 读出的明文只存在于 `model.Account` 的 `gorm:"-"` 字段上，**任何 HTTP 响应都不含凭据**。
+
+两个容易踩的坑（都有集成测试兜着）：
+
+- `enabled` / `weight` 在模型上**不能写 `default`**：GORM 的 INSERT 会跳过"带 default 的零值字段"，
+  一旦写成 `default:true`，`enabled=false` 的账号根本建不出来（会被数据库默认值悄悄覆盖）。
+- 查询里带 `OR` 时必须自己加括号，例如 `(next_verify_at IS NULL OR next_verify_at <= ?)`：
+  GORM 拼接多个 `Where` 不会自动加括号，否则会退化成
+  `(enabled AND status IN (...) AND next_verify_at IS NULL) OR next_verify_at <= ?`，
+  后半段不带任何过滤，会把未到期甚至已停用/封禁的账号一起捞出来。
 
 ## 环境变量
 
@@ -135,14 +163,14 @@ ACCOUNT_SWEEP_INTERVAL`、抖动越界、密钥长度/编码非法、OCR 地址�
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/healthz` | 健康检查。号池没有在线账号或数据库不可用 → **503**，便于探活摘实例 |
-| GET | `/api/v1/pool/status` | 号池快照（在线/待重登/失败/停用数、最近一轮扫描统计） |
+| GET | `/api/v1/pool/status` | 号池快照（在线/待重登/失败/停用/封禁数、最近一轮扫描统计） |
 | GET | `/api/v1/problems/:pid` | 题目详情（走号池选号 + 失效换号重试） |
 | GET | `/api/v1/problems?keyword=&page=&pageSize=` | 题目搜索 |
 | GET | `/api/v1/admin/accounts` | 账号列表（**需 `X-Admin-Token`**） |
 | POST | `/api/v1/admin/accounts` | 新增账号并尝试首次登录 |
 | GET | `/api/v1/admin/accounts/:id` | 账号详情 |
 | PATCH | `/api/v1/admin/accounts/:id` | `{"enabled":true/false}` 启停；启用 `disabled` 账号会复位状态交给扫描器重试 |
-| DELETE | `/api/v1/admin/accounts/:id` | 软删除并移出号池 |
+| DELETE | `/api/v1/admin/accounts/:id` | 软删除并移出号池；**再次用同名 username 创建会自动复活原行**（主键不变，凭据/状态/档案全部重置，created_at 保留） |
 | POST | `/api/v1/admin/accounts/:id/relogin` | 强制立即重登 |
 
 业务码：`0` 成功、`400` 参数错、`401` 令牌无效、`404` 不存在、`409` 冲突、`500` 内部错误、

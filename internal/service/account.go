@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -13,7 +12,8 @@ import (
 
 // AccountStore 账号管理所需的数据访问能力
 type AccountStore interface {
-	Create(ctx context.Context, acc *model.Account) error
+	// Create 新建账号；若同名账号此前被软删除则复活它，revived=true
+	Create(ctx context.Context, acc *model.Account) (revived bool, err error)
 	GetByID(ctx context.Context, id uint) (*model.Account, error)
 	ListAll(ctx context.Context) ([]*model.Account, error)
 	SetEnabled(ctx context.Context, id uint, enabled bool) error
@@ -135,18 +135,46 @@ func (s *AccountService) Create(ctx context.Context, username, password, nicknam
 		Weight:   1,
 		Status:   model.AccountStatusNew,
 	}
-	if err := s.store.Create(ctx, acc); err != nil {
+	revived, err := s.store.Create(ctx, acc)
+	if err != nil {
 		return AccountDTO{}, err
+	}
+	if revived {
+		s.logger.Info("同名账号此前已被删除，已复活并重置为待登录",
+			"account_id", acc.ID, "username", username)
 	}
 
 	if err := s.pool.Load(ctx, acc.ID); err != nil {
 		s.logger.Warn("账号已入库但未能进入号池", "account_id", acc.ID, "err", err)
 	} else if err := s.pool.ForceRelogin(ctx, acc.ID); err != nil {
-		s.logger.Warn("账号首次登录未成功，将由扫描器重试",
-			"account_id", acc.ID, "username", username, "err", err)
+		// 分清"稍后会自动重试"与"需要人工处理"：banned/disabled 不会被扫描器重试，
+		// 日志说错了会让人一直等一个永远不会到来的自动恢复。
+		s.logAuthFailure(ctx, acc.ID, username, err)
 	}
 
 	return s.Get(ctx, acc.ID)
+}
+
+// logAuthFailure 首次登录失败时按落库状态给出准确的提示
+func (s *AccountService) logAuthFailure(ctx context.Context, id uint, username string, cause error) {
+	current, err := s.store.GetByID(ctx, id)
+	if err != nil {
+		s.logger.Warn("账号首次登录未成功，将由扫描器重试",
+			"account_id", id, "username", username, "err", cause)
+		return
+	}
+
+	switch current.Status {
+	case model.AccountStatusBanned:
+		s.logger.Error("账号已被洛谷封禁/限制，未进入号池（解封后用 PATCH enabled=true 重新启用）",
+			"account_id", id, "username", username, "err", cause)
+	case model.AccountStatusDisabled:
+		s.logger.Error("账号凭据不可用，未进入号池（需人工处理：密码错误/账号锁定/二次验证）",
+			"account_id", id, "username", username, "err", cause)
+	default:
+		s.logger.Warn("账号首次登录未成功，将由扫描器重试",
+			"account_id", id, "username", username, "status", current.Status, "err", cause)
+	}
 }
 
 // Get 查询单个账号
@@ -192,7 +220,9 @@ func (s *AccountService) SetEnabled(ctx context.Context, id uint, enabled bool) 
 		return s.Get(ctx, id)
 	}
 
-	if acc.Status == model.AccountStatusDisabled {
+	// disabled（密码错/锁定）与 banned（洛谷封禁）都不会被扫描器自动重试，
+	// 手工重新启用时必须复位状态，否则运维修好问题后账号也永远回不了池子。
+	if acc.Status == model.AccountStatusDisabled || acc.Status == model.AccountStatusBanned {
 		if err := s.store.UpdatePoolState(ctx, id, model.PoolState{
 			Online:       false,
 			Status:       model.AccountStatusNew,
@@ -202,7 +232,8 @@ func (s *AccountService) SetEnabled(ctx context.Context, id uint, enabled bool) 
 		}); err != nil {
 			return AccountDTO{}, err
 		}
-		s.logger.Info("账号已重新启用，将重新尝试验证/登录", "account_id", id, "username", acc.Username)
+		s.logger.Info("账号已重新启用，将重新尝试验证/登录",
+			"account_id", id, "username", acc.Username, "prev_status", acc.Status)
 	}
 
 	if err := s.pool.Load(ctx, id); err != nil {
@@ -223,8 +254,8 @@ func (s *AccountService) Delete(ctx context.Context, id uint) error {
 
 // Relogin 强制立即重登（运维手动触发）
 func (s *AccountService) Relogin(ctx context.Context, id uint) (AccountDTO, error) {
-	if err := s.pool.ForceRelogin(ctx, id); err != nil && !errors.Is(err, model.ErrAccountNotFound) {
-		// 重登失败也把最新状态返回给调用方，便于看到失败原因
+	// 重登失败也把最新状态返回给调用方，便于看到失败原因
+	if err := s.pool.ForceRelogin(ctx, id); err != nil {
 		s.logger.Warn("手动重登未成功", "account_id", id, "err", err)
 	}
 	return s.Get(ctx, id)
