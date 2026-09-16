@@ -58,11 +58,11 @@ func (p *Problem) MemoryLimit() int {
 
 // ProblemContent 题目内容（从 contenu/content 字段提取）
 type ProblemContent struct {
-	Description string `json:"description"`
-	InputFormat string `json:"formatI"`
+	Description  string `json:"description"`
+	InputFormat  string `json:"formatI"`
 	OutputFormat string `json:"formatO"`
-	Hint        string `json:"hint"`
-	Background  string `json:"background"`
+	Hint         string `json:"hint"`
+	Background   string `json:"background"`
 }
 
 // ProblemLimits 时空限制
@@ -266,16 +266,16 @@ type TrainingDetail struct {
 
 // TrainingProblem 题单中的题目
 type TrainingProblem struct {
-	PID           string   `json:"pid"`
-	Type          string   `json:"type"`
-	Name          string   `json:"name"`
-	Difficulty    int      `json:"difficulty"`
-	Submitted     bool     `json:"submitted"`
-	Accepted      bool     `json:"accepted"`
-	Tags          []int    `json:"tags"`
-	TotalSubmit   int      `json:"totalSubmit"`
-	TotalAccepted int      `json:"totalAccepted"`
-	Flag          int      `json:"flag"`
+	PID           string `json:"pid"`
+	Type          string `json:"type"`
+	Name          string `json:"name"`
+	Difficulty    int    `json:"difficulty"`
+	Submitted     bool   `json:"submitted"`
+	Accepted      bool   `json:"accepted"`
+	Tags          []int  `json:"tags"`
+	TotalSubmit   int    `json:"totalSubmit"`
+	TotalAccepted int    `json:"totalAccepted"`
+	Flag          int    `json:"flag"`
 }
 
 // --- 用户 (User) ---
@@ -418,7 +418,7 @@ type ContestHost struct {
 // ContestDetail 比赛详情
 type ContestDetail struct {
 	ContestSummary
-	Joined int `json:"joined"`
+	Joined            int    `json:"joined"`
 	Description       string `json:"description"`
 	RuleType          int    `json:"ruleType"`
 	Difficulty        int    `json:"difficulty"`

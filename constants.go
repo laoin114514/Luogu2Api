@@ -14,8 +14,8 @@ const (
 	StatusUnaccepted RecordStatus = 14 // 未通过/部分分
 
 	// 以下为测试点级别的状态码（detail.judgeResult.subtasks.testCases.status）
-	TestCaseMLEorTLE   RecordStatus = 4  // 资源超限（description 为空，疑为 MLE/TLE）
-	TestCaseWrongAnswer RecordStatus = 6 // 答案错误（description 含 "wrong answer"）
+	TestCaseMLEorTLE    RecordStatus = 4  // 资源超限（description 为空，疑为 MLE/TLE）
+	TestCaseWrongAnswer RecordStatus = 6  // 答案错误（description 含 "wrong answer"）
 	TestCaseAccepted    RecordStatus = 12 // 单个测试点通过（description 含 "ok accepted"）
 )
 
