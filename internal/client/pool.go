@@ -724,6 +724,7 @@ func (p *Pool) withSession(ctx context.Context, op string, fn func(SessionClient
 			return fmt.Errorf("%s: %w", op, ErrPoolExhausted)
 		}
 		tried[s.id] = true
+		p.logger.Debug("选号执行请求", "op", op, "account_id", s.id, "username", s.username)
 
 		s.mu.RLock()
 		callErr := fn(s.client)

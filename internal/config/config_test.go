@@ -19,6 +19,7 @@ func clearEnv(t *testing.T) {
 		"DB_MAX_OPEN_CONNS", "DB_MAX_IDLE_CONNS", "DB_CONN_MAX_LIFETIME",
 		"DB_AUTO_MIGRATE", "DB_LOG_LEVEL",
 		"LUOGU_TIMEOUT", "LUOGU_RETRY", "LUOGU_OCR_URL", "LUOGU_OCR_TOKEN", "LUOGU_OCR_TIMEOUT",
+		"LUOGU_OCR_MODE",
 		"ACCOUNT_SECRET_KEY", "ACCOUNT_SWEEP_INTERVAL", "ACCOUNT_VERIFY_INTERVAL",
 		"ACCOUNT_VERIFY_JITTER", "ACCOUNT_VERIFY_CONCURRENCY", "ACCOUNT_LOGIN_MAX_ATTEMPTS",
 		"ACCOUNT_LOGIN_BACKOFF", "ACCOUNT_FAILED_RETRY", "ACCOUNT_REQUEST_MAX_TRY",
@@ -84,6 +85,9 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.OCR.URL != "http://127.0.0.1:9898/ocr" || cfg.OCR.Timeout != 5*time.Second {
 		t.Errorf("OCR = %+v", cfg.OCR)
+	}
+	if cfg.OCR.Mode != OCRModeBase64 {
+		t.Errorf("OCR.Mode = %q, want %q", cfg.OCR.Mode, OCRModeBase64)
 	}
 	if cfg.Admin.Enabled() {
 		t.Error("ADMIN_TOKEN 为空时管理接口应不可用（fail closed）")
@@ -234,6 +238,25 @@ func TestLoadRejectsBadOCRURL(t *testing.T) {
 
 	if _, err := Load(); err == nil {
 		t.Error("OCR 地址缺少协议头时应报错")
+	}
+}
+
+func TestLoadOCRMode(t *testing.T) {
+	clearEnv(t)
+	setRequired(t)
+	t.Setenv("LUOGU_OCR_MODE", "RAW") // 大小写不敏感
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.OCR.Mode != OCRModeRaw {
+		t.Errorf("OCR.Mode = %q, want %q", cfg.OCR.Mode, OCRModeRaw)
+	}
+
+	t.Setenv("LUOGU_OCR_MODE", "multipart")
+	if _, err := Load(); err == nil {
+		t.Error("未知入参形态应报错")
 	}
 }
 

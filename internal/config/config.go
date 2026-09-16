@@ -44,6 +44,15 @@ const (
 
 	// 验证码识别服务
 	defaultOCRTimeout = 5 * time.Second
+	defaultOCRMode    = OCRModeBase64
+)
+
+// OCR 入参形态
+const (
+	// OCRModeBase64 以 JSON {"image_base64":"..."} 提交图片（默认，配合现用服务）
+	OCRModeBase64 = "base64"
+	// OCRModeRaw 直接提交原始 JPEG 字节（Content-Type: image/jpeg）
+	OCRModeRaw = "raw"
 )
 
 // Config 服务总配置
@@ -124,6 +133,7 @@ type Account struct {
 type OCR struct {
 	URL     string
 	Token   string
+	Mode    string // base64 / raw
 	Timeout time.Duration
 }
 
@@ -178,6 +188,7 @@ func Load() (Config, error) {
 		OCR: OCR{
 			URL:     strings.TrimSpace(os.Getenv("LUOGU_OCR_URL")),
 			Token:   strings.TrimSpace(os.Getenv("LUOGU_OCR_TOKEN")),
+			Mode:    strings.ToLower(env("LUOGU_OCR_MODE", defaultOCRMode)),
 			Timeout: envDuration("LUOGU_OCR_TIMEOUT", defaultOCRTimeout),
 		},
 		Admin: Admin{
@@ -235,6 +246,10 @@ func (c Config) validate() error {
 	}
 	if c.OCR.Timeout <= 0 {
 		return fmt.Errorf("config: LUOGU_OCR_TIMEOUT 必须大于 0")
+	}
+	if c.OCR.Mode != OCRModeBase64 && c.OCR.Mode != OCRModeRaw {
+		return fmt.Errorf("config: LUOGU_OCR_MODE 只能是 %s 或 %s，当前 %q",
+			OCRModeBase64, OCRModeRaw, c.OCR.Mode)
 	}
 
 	if c.Luogu.Timeout <= 0 {

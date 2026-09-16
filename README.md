@@ -111,6 +111,7 @@ cmd/api ──► router ──► handler ──► service ──► repositor
 | `DB_HOST` / `DB_USER` / `DB_NAME` | 号池依赖 MySQL；缺任一项启动即报错 |
 | `ACCOUNT_SECRET_KEY` | 凭据加密密钥，`openssl rand -base64 32`（也接受 hex 的 16/24/32 字节） |
 | `LUOGU_OCR_URL` | 验证码识别服务地址（SDK 不内置 OCR） |
+| `LUOGU_OCR_MODE` | 入参形态：`base64`（默认，JSON `{"image_base64":"..."}`）/ `raw`（原始 JPEG 字节） |
 
 常用项：
 
