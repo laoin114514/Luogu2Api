@@ -106,6 +106,15 @@ type Account struct {
 	LastVerifiedAt *time.Time `gorm:"column:last_verified_at"`
 	CookieUpdated  *time.Time `gorm:"column:cookie_updated_at"`
 
+	// --- 代码公开计划（可选能力，由 ACCOUNT_JOIN_OPEN_SOURCE 开启） ---
+	// 加入后洛谷限制 30 天内不能退出，因此这是"一生只做一次"的动作：
+	// 成功后不再请求，只靠这两列记录结果与解锁时间点。
+	//
+	// OpenSourceJoined 不写 default：与 Enabled 同理，GORM 会跳过"带 default 的
+	// 零值字段"，这里的零值 false 正是新账号想要的初始值。
+	OpenSourceJoined   bool       `gorm:"column:open_source_joined;not null;comment:是否已加入代码公开计划"`
+	OpenSourceJoinedAt *time.Time `gorm:"column:open_source_joined_at;comment:洛谷记录的加入时间（30 天锁定的解锁基准）"`
+
 	// --- 洛谷平台用户字段（登录后回填） ---
 	Name        string `gorm:"column:name;type:varchar(64);not null;default:''"`
 	Avatar      string `gorm:"column:avatar;type:varchar(512);not null;default:''"`

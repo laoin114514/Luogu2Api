@@ -47,6 +47,11 @@ type AccountDTO struct {
 	LastLoginAt    *time.Time `json:"lastLoginAt,omitempty"`
 	LastVerifiedAt *time.Time `json:"lastVerifiedAt,omitempty"`
 
+	// 代码公开计划（ACCOUNT_JOIN_OPEN_SOURCE 开启时才可能为 true）：
+	// 恒为 false 说明还没做成——失败原因只在日志里，账号本身照常可用。
+	OpenSourceJoined   bool       `json:"openSourceJoined"`
+	OpenSourceJoinedAt *time.Time `json:"openSourceJoinedAt,omitempty"`
+
 	// 洛谷平台用户字段
 	Name       string `json:"name"`
 	Avatar     string `json:"avatar"`
@@ -69,31 +74,33 @@ func NewAccountDTO(acc *model.Account) AccountDTO {
 		return AccountDTO{}
 	}
 	return AccountDTO{
-		ID:             acc.ID,
-		Username:       acc.Username,
-		LuoguUID:       acc.UIDValue(),
-		Nickname:       acc.Nickname,
-		Online:         acc.Online,
-		Status:         acc.Status,
-		Enabled:        acc.Enabled,
-		Weight:         acc.Weight,
-		FailureCount:   acc.FailureCount,
-		LastError:      acc.LastError,
-		NextVerifyAt:   acc.NextVerifyAt,
-		LastLoginAt:    acc.LastLoginAt,
-		LastVerifiedAt: acc.LastVerifiedAt,
-		Name:           acc.Name,
-		Avatar:         acc.Avatar,
-		Slogan:         acc.Slogan,
-		Badge:          acc.Badge,
-		Color:          acc.Color,
-		IsAdmin:        acc.IsAdmin,
-		IsBanned:       acc.IsBanned,
-		CCFLevel:       acc.CCFLevel,
-		XCPCLevel:      acc.XCPCLevel,
-		Background:     acc.Background,
-		CreatedAt:      acc.CreatedAt,
-		UpdatedAt:      acc.UpdatedAt,
+		ID:                 acc.ID,
+		Username:           acc.Username,
+		LuoguUID:           acc.UIDValue(),
+		Nickname:           acc.Nickname,
+		Online:             acc.Online,
+		Status:             acc.Status,
+		Enabled:            acc.Enabled,
+		Weight:             acc.Weight,
+		FailureCount:       acc.FailureCount,
+		LastError:          acc.LastError,
+		NextVerifyAt:       acc.NextVerifyAt,
+		LastLoginAt:        acc.LastLoginAt,
+		LastVerifiedAt:     acc.LastVerifiedAt,
+		OpenSourceJoined:   acc.OpenSourceJoined,
+		OpenSourceJoinedAt: acc.OpenSourceJoinedAt,
+		Name:               acc.Name,
+		Avatar:             acc.Avatar,
+		Slogan:             acc.Slogan,
+		Badge:              acc.Badge,
+		Color:              acc.Color,
+		IsAdmin:            acc.IsAdmin,
+		IsBanned:           acc.IsBanned,
+		CCFLevel:           acc.CCFLevel,
+		XCPCLevel:          acc.XCPCLevel,
+		Background:         acc.Background,
+		CreatedAt:          acc.CreatedAt,
+		UpdatedAt:          acc.UpdatedAt,
 	}
 }
 

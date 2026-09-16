@@ -70,6 +70,36 @@ cmd/api ──► router ──► handler ──► service ──► repositor
 并带 `±ACCOUNT_VERIFY_JITTER` 抖动，避免整池在同一时刻一起打洛谷。扫描有重入保护，
 上一轮没跑完时下一个 tick 直接跳过。
 
+### 可选的"代码公开计划"补做（默认关闭）
+
+`ACCOUNT_JOIN_OPEN_SOURCE=true` 时，号池会为池内账号调一次
+`POST /user/setting/preference/update` 把 `openSource` 设成 1（加入洛谷"代码公开计划"）。
+
+刻意**不放在导入的关键路径上**：那会让一个与号池功能无关的写接口成为导入的前置条件
+（洛谷 429/维护 → 无法导入任何账号 → 补员中断），而且"导入即失败不落库"会绕过
+下面那套失败分类，把一次网络抖动判成账号不可用。改为在**手上有活会话**的两个时机补做：
+
+- `completeLogin` 登录成功之后；
+- 每轮验证成功（`handleAccount` 的 `ok` 分支）之后。
+
+三条硬约束：
+
+1. **幂等**：`accounts.open_source_joined=true` 时连读都不发，一次请求都不产生；
+   远端已经是 1 时只读一次偏好、不写。这一列成功一次就永久跳过。
+2. **失败绝不改账号命运**：不碰 `online`/`status`/`failure_count`/`next_verify_at`，
+   也不占用 `last_error`，只打一条 WARN 并保持 `open_source_joined=false`，
+   交给下一轮验证周期（`ACCOUNT_VERIFY_INTERVAL` + 抖动）自然重试。
+3. **不在数据库事务里做远程调用**：远端成功才落库；落库失败只是下轮再确认一次
+   （远端已是 1，那次只读不写）。
+
+写成"读-改-写"而不是只发 `{"openSource":1}`：偏好更新是**全量替换**语义，省略字段会被
+服务端重置成平台默认值（`codeSharingWithAi=true`、`learningMode=false`），只发一个字段会
+顺手改掉账号的其它偏好。该逻辑在 SDK 的 `UserService.JoinOpenSourcePlan`，有 httptest 覆盖。
+
+⚠️ **加入后 30 天内不能退出**（把 `openSource` 改回 `0`/`-1` 返回 HTTP 400），且账号代码会公开。
+所以这是显式 opt-in，默认不做；`open_source_joined_at` 记的是洛谷返回的加入时间，
+即"何时可以退出"的基准。运维可在账号 DTO 的 `openSourceJoined` / `openSourceJoinedAt` 看到进度。
+
 ### 错误分类决定账号命运（核心设计）
 
 只有**确认 cookie 失效或账号被拒**才会把账号标记为不可用：
@@ -117,6 +147,7 @@ cmd/api ──► router ──► handler ──► service ──► repositor
 - 凭据：`username`、`password_enc`、`cookie_enc`（**AES-GCM 密文**，密钥来自 `ACCOUNT_SECRET_KEY`）
 - 运行状态：`online`、`status`（`new`/`active`/`relogin_pending`/`relogin_failed`/`disabled`/`banned`）、`failure_count`、`last_error`、`next_verify_at`、`last_login_at`、`last_verified_at`、`cookie_updated_at`、`enabled`、`weight`
 - 洛谷平台用户字段：`luogu_uid`（未登录为 NULL，避免唯一索引冲突）、`nickname`、`name`、`avatar`、`slogan`、`badge`、`color`、`is_admin`、`is_banned`、`ccf_level`、`xcpc_level`、`background`、`profile_json`（原始 JSON 快照，便于以后扩展字段）
+- 代码公开计划（可选能力）：`open_source_joined`（是否已确认加入）、`open_source_joined_at`（洛谷返回的加入时间 = 30 天锁定期的解锁基准）
 
 写入一律走列级 `Updates(map)`：扫描器与请求路径会并发改同一行，整行 `Save` 会丢更新。
 读出的明文只存在于 `model.Account` 的 `gorm:"-"` 字段上，**任何 HTTP 响应都不含凭据**。
@@ -125,6 +156,7 @@ cmd/api ──► router ──► handler ──► service ──► repositor
 
 - `enabled` / `weight` 在模型上**不能写 `default`**：GORM 的 INSERT 会跳过"带 default 的零值字段"，
   一旦写成 `default:true`，`enabled=false` 的账号根本建不出来（会被数据库默认值悄悄覆盖）。
+  `open_source_joined` 同理（它的零值 `false` 正是新账号要的初始值）。
 - 查询里带 `OR` 时必须自己加括号，例如 `(next_verify_at IS NULL OR next_verify_at <= ?)`：
   GORM 拼接多个 `Where` 不会自动加括号，否则会退化成
   `(enabled AND status IN (...) AND next_verify_at IS NULL) OR next_verify_at <= ?`，
@@ -132,7 +164,23 @@ cmd/api ──► router ──► handler ──► service ──► repositor
 
 ## 环境变量
 
-见 `configs/env.example`。必填项：
+**配置只来自环境变量**（`config.Load()` 是纯函数，只读 `os.Getenv`）。二进制刻意
+**不读** `.env`：部署侧（compose / k8s / 服务管理器）本来就负责注入环境变量，而在代码里
+读 `.env` 会让"配置来源"变成依赖工作目录的隐藏输入——镜像里、挂载卷里残留一个 `.env`
+就能把忘记配置的必填项**悄悄补上**，正好破坏这个项目的 fail-fast（本该启动即报错，
+变成带着开发库的连接跑起来）。
+
+两种场景各自的入口：
+
+| 场景 | 怎么给配置 |
+|---|---|
+| 本地开发 | `pwsh scripts/dev.ps1`：把 `configs/.env` 导出到当前会话再 `go run`（见"本地运行"） |
+| 部署 | compose 的 `env_file: configs/.env` / `environment:`，或 k8s Secret、服务管理器的环境变量 |
+
+`configs/env.example` 是模板；`configs/.env` 已在 `.gitignore` 里，**不要**打进镜像
+（`COPY . .` 记得配 `.dockerignore`，否则上面那条 fail-fast 的保证就失效了）。
+
+必需项：
 
 | 变量 | 说明 |
 |---|---|
@@ -153,6 +201,7 @@ cmd/api ──► router ──► handler ──► service ──► repositor
 | `ACCOUNT_VERIFY_INTERVAL` | `30m` | 单账号验证间隔（带抖动） |
 | `ACCOUNT_LOGIN_MAX_ATTEMPTS` | `5` | 单次重登任务的尝试次数 |
 | `ACCOUNT_REQUEST_MAX_TRY` | `3` | 业务请求最多换几个账号 |
+| `ACCOUNT_JOIN_OPEN_SOURCE` | `false` | 让池内账号加入洛谷"代码公开计划"（**不可逆 30 天**，见上节） |
 | `ADMIN_TOKEN` | 空 | 为空则**不注册**管理路由（fail closed） |
 
 配置校验：缺少必填项、`DB_MAX_IDLE_CONNS > DB_MAX_OPEN_CONNS`、`ACCOUNT_VERIFY_INTERVAL <
@@ -185,7 +234,21 @@ mysql -uroot -e "CREATE DATABASE IF NOT EXISTS luogu2api DEFAULT CHARSET utf8mb4
 # 2) 起一个假 OCR（本地联调用，详见 scripts/ocr_stub.py 的说明）
 python3 scripts/ocr_stub.py
 
-# 3) 配置并启动
+# 3) 配置：复制样例后编辑 configs/.env（已在 .gitignore 里）
+Copy-Item configs/env.example configs/.env
+# 编辑 configs/.env：至少填 ACCOUNT_SECRET_KEY（openssl rand -base64 32）
+# 与 LUOGU_OCR_URL；本地可用 DB_AUTO_MIGRATE=true 让它自动建表
+
+# 4) 启动（把 .env 导出到当前会话，退出即失效；不会污染系统环境变量）
+pwsh scripts/dev.ps1
+# Windows PowerShell 5.1 亦可（脚本带 UTF-8 BOM）：
+powershell -ExecutionPolicy Bypass -File scripts/dev.ps1
+```
+
+不用脚本也可以照旧导出环境变量（**已存在的非空变量优先于 `.env`**，脚本与 compose
+的 `env_file` 都是这个优先级）：
+
+```powershell
 $env:DB_HOST="127.0.0.1"; $env:DB_USER="root"; $env:DB_PASSWORD=""; $env:DB_NAME="luogu2api"
 $env:DB_AUTO_MIGRATE="true"
 $env:ACCOUNT_SECRET_KEY=(openssl rand -base64 32)
@@ -261,9 +324,22 @@ go test ./internal/repository/ -v
   把验证间隔调到分钟级。
 - **凭据不能进日志**：日志只记 `account_id/username/status/错误类型`。管理接口返回 DTO，
   永不含 `password`/`cookie`；`ADMIN_TOKEN` 必须设置，否则管理路由不注册（避免裸奔的号池管理入口）。
-- **SDK 几乎没有写入能力**：`luoguClient` 目前唯一的写接口是 `User.UpdatePreference`（账号偏好设置，
-  见 SDK 的 `api.md`），题目/记录/题单/讨论/比赛全是只读；号池只服务只读业务接口，
-  `internal/` 这一层**没有**接入偏好设置写入（要接入需要先决定暴露给谁、怎么鉴权）。
+- **代码公开计划是不可逆的**：开启 `ACCOUNT_JOIN_OPEN_SOURCE` 后账号会陆续加入洛谷"代码公开计划"，
+  加入后 **30 天内不能退出**（洛谷直接拒绝把 `openSource` 改回 `0`/`-1`），期间账号代码公开。
+  开启前请确认这是你要的；关掉开关只停止"继续补做"，**不会**把已加入的账号退出来。
+- **SDK 几乎没有写入能力**：`luoguClient` 的写接口只有账号偏好设置（`UpdatePreference` /
+  `JoinOpenSourcePlan`，见 SDK 的 `api.md`），题目/记录/题单/讨论/比赛全是只读。
+  号池只在 `ACCOUNT_JOIN_OPEN_SOURCE=true` 时用它补做"加入代码公开计划"（幂等、失败不影响可用性），
+  没有对外暴露写接口——要暴露得先决定给谁用、怎么鉴权。
+- **新增列要手动迁移**：`open_source_joined` / `open_source_joined_at` 只在
+  `DB_AUTO_MIGRATE=true` 时自动加；生产请先执行（与 AutoMigrate 生成的定义一致，
+  刻意不写 `DEFAULT`：模型里也不写 `default` 标签，见上面那个 GORM 的坑）
+  ```sql
+  ALTER TABLE accounts
+    ADD COLUMN open_source_joined TINYINT(1) NOT NULL,
+    ADD COLUMN open_source_joined_at DATETIME(3) NULL;
+  ```
+  再滚动升级（老版本先跑也不受影响：旧代码不认识这两列，新代码缺列才会报错）。
 - **已知限制**：SDK 的 `WithContext` 只在构造期生效，业务请求无法按调用方 ctx 取消，只能用
   `LUOGU_TIMEOUT` + `http.Server` 超时兜底。
 - **submodule**：`git clone --recursive`（CI 里 `submodules: true`），否则 `pkg/luoguClient` 为空、

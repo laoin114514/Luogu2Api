@@ -23,7 +23,7 @@ func clearEnv(t *testing.T) {
 		"ACCOUNT_SECRET_KEY", "ACCOUNT_SWEEP_INTERVAL", "ACCOUNT_VERIFY_INTERVAL",
 		"ACCOUNT_VERIFY_JITTER", "ACCOUNT_VERIFY_CONCURRENCY", "ACCOUNT_LOGIN_MAX_ATTEMPTS",
 		"ACCOUNT_LOGIN_BACKOFF", "ACCOUNT_FAILED_RETRY", "ACCOUNT_REQUEST_MAX_TRY",
-		"ACCOUNT_SWEEP_BATCH_LIMIT",
+		"ACCOUNT_SWEEP_BATCH_LIMIT", "ACCOUNT_JOIN_OPEN_SOURCE",
 		"ADMIN_TOKEN", "LOG_LEVEL",
 	} {
 		t.Setenv(k, "")
@@ -79,9 +79,14 @@ func TestLoadDefaults(t *testing.T) {
 		FailedRetry:       time.Hour,
 		RequestMaxTry:     3,
 		SweepBatchLimit:   200,
+		// 加入"代码公开计划"是不可逆动作，默认必须关闭
+		JoinOpenSource: false,
 	}
 	if cfg.Account != wantAccount {
 		t.Errorf("Account 默认值 = %+v, want %+v", cfg.Account, wantAccount)
+	}
+	if cfg.Account.JoinOpenSource {
+		t.Error("ACCOUNT_JOIN_OPEN_SOURCE 未设置时应为 false（默认不做不可逆的隐私设置变更）")
 	}
 	if cfg.OCR.URL != "http://127.0.0.1:9898/ocr" || cfg.OCR.Timeout != 5*time.Second {
 		t.Errorf("OCR = %+v", cfg.OCR)
@@ -144,6 +149,38 @@ func TestLoadFromEnv(t *testing.T) {
 	}
 	if cfg.LogLevel != "debug" {
 		t.Errorf("LogLevel = %q", cfg.LogLevel)
+	}
+}
+
+// 加入"代码公开计划"必须显式开启（不可逆动作，不做默认副作用）
+func TestLoadJoinOpenSource(t *testing.T) {
+	clearEnv(t)
+	setRequired(t)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Account.JoinOpenSource {
+		t.Error("默认应为关闭")
+	}
+
+	t.Setenv("ACCOUNT_JOIN_OPEN_SOURCE", "true")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Account.JoinOpenSource {
+		t.Error("ACCOUNT_JOIN_OPEN_SOURCE=true 应开启")
+	}
+
+	t.Setenv("ACCOUNT_JOIN_OPEN_SOURCE", "false")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Account.JoinOpenSource {
+		t.Error("ACCOUNT_JOIN_OPEN_SOURCE=false 应关闭")
 	}
 }
 

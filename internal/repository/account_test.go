@@ -201,6 +201,10 @@ func TestAccountCreateRevivesSoftDeletedUsername(t *testing.T) {
 	if !got.Enabled {
 		t.Error("复活后应处于启用状态")
 	}
+	if got.OpenSourceJoined || got.OpenSourceJoinedAt != nil {
+		t.Errorf("复活应把代码公开计划状态重置为未确认: joined=%v at=%v",
+			got.OpenSourceJoined, got.OpenSourceJoinedAt)
+	}
 
 	// 复活后能按用户名查到（软删除已撤销）
 	if _, err := repo.GetByUsername(ctx, first.Username); err != nil {
@@ -211,6 +215,81 @@ func TestAccountCreateRevivesSoftDeletedUsername(t *testing.T) {
 	again := &model.Account{Username: first.Username, Password: "x", Enabled: true}
 	if _, err := repo.Create(ctx, again); !errors.Is(err, model.ErrAccountExists) {
 		t.Errorf("同名且未删除应报 ErrAccountExists，得到 %v", err)
+	}
+}
+
+// MarkOpenSourceJoined 幂等：重复调用不报错，且不会把加入时间改成新值
+func TestAccountMarkOpenSourceJoinedIsIdempotent(t *testing.T) {
+	repo, _ := newRepo(t)
+	ctx := context.Background()
+
+	acc := &model.Account{Username: repo.username("opensource"), Password: "pwd", Enabled: true}
+	if _, err := repo.Create(ctx, acc); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	joinedAt := time.Now().Truncate(time.Second)
+	if err := repo.MarkOpenSourceJoined(ctx, acc.ID, joinedAt); err != nil {
+		t.Fatalf("MarkOpenSourceJoined: %v", err)
+	}
+
+	got, err := repo.GetByID(ctx, acc.ID)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if !got.OpenSourceJoined {
+		t.Error("open_source_joined 应为 true")
+	}
+	if got.OpenSourceJoinedAt == nil || !got.OpenSourceJoinedAt.Equal(joinedAt) {
+		t.Errorf("open_source_joined_at = %v, want %v", got.OpenSourceJoinedAt, joinedAt)
+	}
+
+	// 重复调用（并发下可能发生）：不能报错，也不能覆盖首次的加入时间
+	later := joinedAt.Add(time.Hour)
+	if err := repo.MarkOpenSourceJoined(ctx, acc.ID, later); err != nil {
+		t.Fatalf("重复 MarkOpenSourceJoined 不应报错: %v", err)
+	}
+	got, err = repo.GetByID(ctx, acc.ID)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if got.OpenSourceJoinedAt == nil || !got.OpenSourceJoinedAt.Equal(joinedAt) {
+		t.Errorf("加入时间被覆盖为 %v, want %v", got.OpenSourceJoinedAt, joinedAt)
+	}
+}
+
+// 只碰这两列：不能顺手改动号池状态或凭据
+func TestAccountMarkOpenSourceJoinedTouchesOnlyItsColumns(t *testing.T) {
+	repo, _ := newRepo(t)
+	ctx := context.Background()
+
+	acc := &model.Account{Username: repo.username("opensource-cols"), Password: "pwd", Enabled: true}
+	if _, err := repo.Create(ctx, acc); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	now := time.Now().Truncate(time.Second)
+	if err := repo.SaveSession(ctx, acc.ID, `[{"name":"_uid","value":"1965145"}]`, 1965145,
+		model.LuoguProfile{Name: "昵称", RawJSON: `{"uid":1965145}`}, now, now.Add(time.Hour)); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+
+	if err := repo.MarkOpenSourceJoined(ctx, acc.ID, now); err != nil {
+		t.Fatalf("MarkOpenSourceJoined: %v", err)
+	}
+
+	got, err := repo.GetByID(ctx, acc.ID)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if got.Status != model.AccountStatusActive || !got.Online {
+		t.Errorf("号池状态被改动: status=%q online=%v", got.Status, got.Online)
+	}
+	if got.UIDValue() != 1965145 || got.Cookie == "" || got.Password != "pwd" {
+		t.Errorf("凭据/档案被改动: uid=%d cookie=%q", got.UIDValue(), got.Cookie)
+	}
+	if got.NextVerifyAt == nil {
+		t.Error("next_verify_at 被改动")
 	}
 }
 

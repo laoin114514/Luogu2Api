@@ -135,6 +135,11 @@ func (r *AccountRepository) reviveSoftDeleted(ctx context.Context, acc *model.Ac
 		"background":        "",
 		"profile_json":      "",
 		"deleted_at":        nil,
+		// 代码公开计划：重置成"未确认"。同一个 username 就是同一个洛谷账号，
+		// 远端加入状态其实不会因删号消失，但复活语义是"当作新导入重新确认一次"，
+		// 而重新确认只是多一次读（远端已是 1 时不会再写），代价可忽略。
+		"open_source_joined":    false,
+		"open_source_joined_at": nil,
 	}
 
 	res := r.db.WithContext(ctx).Unscoped().
@@ -160,6 +165,8 @@ func (r *AccountRepository) reviveSoftDeleted(ctx context.Context, acc *model.Ac
 	acc.CookieSecret = ""
 	acc.PasswordSecret = passwordSecret
 	acc.CreatedAt = row.CreatedAt
+	acc.OpenSourceJoined = false
+	acc.OpenSourceJoinedAt = nil
 	return true, nil
 }
 
@@ -341,6 +348,25 @@ func (r *AccountRepository) MarkTransientFailure(ctx context.Context, id uint, e
 		"last_error":     errMsg,
 		"next_verify_at": nextVerifyAt,
 	})
+}
+
+// MarkOpenSourceJoined 记录账号已加入"代码公开计划"。
+//
+// 刻意不走 update()：那里的 RowsAffected==0 会被当成"账号不存在"报错，而这里是
+// 幂等标记——并发下别人刚写过、或值本来就相同（MySQL 对"没改变任何值"的
+// UPDATE 返回 0 行）都属于正常情况。带 WHERE 守卫让它在数据库层也是幂等的。
+func (r *AccountRepository) MarkOpenSourceJoined(ctx context.Context, id uint, joinedAt time.Time) error {
+	res := r.db.WithContext(ctx).
+		Model(&model.Account{}).
+		Where("id = ? AND open_source_joined = ?", id, false).
+		Updates(map[string]any{
+			"open_source_joined":    true,
+			"open_source_joined_at": joinedAt,
+		})
+	if res.Error != nil {
+		return fmt.Errorf("记录代码公开计划状态失败 (id=%d): %w", id, res.Error)
+	}
+	return nil
 }
 
 // SetEnabled 人工启停账号

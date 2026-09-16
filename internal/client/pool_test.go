@@ -46,6 +46,7 @@ type fakeStore struct {
 	states     []stateUpdate
 	transients []transientUpdate
 	verified   []uint
+	openSource []openSourceUpdate
 	failWrite  error
 }
 
@@ -140,6 +141,38 @@ func (s *fakeStore) MarkTransientFailure(_ context.Context, id uint, msg string,
 	return s.failWrite
 }
 
+// MarkOpenSourceJoined 幂等标记：已标记过就不再重复记录（与真实仓储的 WHERE 守卫一致）
+func (s *fakeStore) MarkOpenSourceJoined(_ context.Context, id uint, joinedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.failWrite != nil {
+		return s.failWrite
+	}
+	if acc, ok := s.accounts[id]; ok && acc.OpenSourceJoined {
+		return nil
+	}
+	s.openSource = append(s.openSource, openSourceUpdate{id: id, joinedAt: joinedAt})
+	if acc, ok := s.accounts[id]; ok {
+		acc.OpenSourceJoined = true
+		at := joinedAt
+		acc.OpenSourceJoinedAt = &at
+	}
+	return nil
+}
+
+// openSourceUpdate 记录一次"加入代码公开计划"的落库
+type openSourceUpdate struct {
+	id       uint
+	joinedAt time.Time
+}
+
+func (s *fakeStore) openSourceCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.openSource)
+}
+
 func (s *fakeStore) lastState() (stateUpdate, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -203,6 +236,10 @@ type fakeSession struct {
 	exportErr  error
 	profile    model.LuoguProfile
 	profileErr error
+
+	codePublicErr   error
+	codePublicAt    time.Time
+	codePublicCalls int
 
 	loginErrs  []error
 	loginCalls int
@@ -272,6 +309,24 @@ func (f *fakeSession) UserProfile() (model.LuoguProfile, error) {
 		return model.LuoguProfile{}, f.profileErr
 	}
 	return f.profile, nil
+}
+
+// EnsureCodePublic 由 codePublicErr / codePublicAt 控制，并记录调用次数
+func (f *fakeSession) EnsureCodePublic() (time.Time, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.codePublicCalls++
+	if f.codePublicErr != nil {
+		return time.Time{}, f.codePublicErr
+	}
+	return f.codePublicAt, nil
+}
+
+func (f *fakeSession) CodePublicCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.codePublicCalls
 }
 
 func (f *fakeSession) SDK() *sdk.Client { return nil }
@@ -1191,5 +1246,220 @@ func TestStatsCountsDisabledAndPending(t *testing.T) {
 	stats := f.pool.Stats()
 	if stats.Total != 4 || stats.Online != 1 || stats.ReloginFailed != 1 || stats.Disabled != 1 || stats.Banned != 1 {
 		t.Errorf("Stats = %+v", stats)
+	}
+}
+
+// ---------- 加入"代码公开计划"（可选能力，方案 B：幂等 + 失败不改账号命运） ----------
+
+// enableJoinOpenSource 打开开关（默认关闭，见 config.defaultAccountJoinOpenSource）
+func enableJoinOpenSource(f *poolFixture) { f.pool.cfg.Account.JoinOpenSource = true }
+
+// 验证成功时补做加入；成功过一次之后不再发任何请求
+func TestJoinCodePublicOnceThenSkipped(t *testing.T) {
+	acc := activeAccount(1, "u1", "cookie-1")
+	joinedAt := time.Date(2026, 2, 1, 10, 0, 0, 0, time.UTC)
+	session := &fakeSession{cookie: "cookie-1", uid: 1965145, codePublicAt: joinedAt}
+
+	f := newFixture(t, true, []*model.Account{acc}, map[uint]*fakeSession{1: session})
+	enableJoinOpenSource(f)
+	if _, err := f.pool.Warmup(context.Background()); err != nil {
+		t.Fatalf("Warmup: %v", err)
+	}
+
+	if _, err := f.pool.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if got := session.CodePublicCalls(); got != 1 {
+		t.Fatalf("首次验证应补做加入，实际调用 %d 次", got)
+	}
+	if f.store.openSourceCount() != 1 {
+		t.Errorf("应落库一次加入记录，实际 %d", f.store.openSourceCount())
+	}
+	if got := f.store.openSource[0].joinedAt; !got.Equal(joinedAt) {
+		t.Errorf("落库的加入时间 = %v, want %v（应采用洛谷返回的时间）", got, joinedAt)
+	}
+	if !f.pool.getSession(1).snapshot().OpenSourceJoined {
+		t.Error("内存快照应同步为已加入")
+	}
+
+	// 第二轮：本地已标记，连读都不该再发
+	if _, err := f.pool.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if got := session.CodePublicCalls(); got != 1 {
+		t.Errorf("已加入的账号不应重复请求，实际 %d 次", got)
+	}
+	if f.store.openSourceCount() != 1 {
+		t.Errorf("不应重复落库，实际 %d 次", f.store.openSourceCount())
+	}
+}
+
+// 刚导入的账号（无 cookie）走重登成功路径，也应补做加入
+func TestReloginJoinsCodePublic(t *testing.T) {
+	acc := activeAccount(1, "u1", "")
+	acc.Online = false
+	acc.Status = model.AccountStatusNew
+
+	joinedAt := time.Date(2026, 2, 1, 10, 0, 0, 0, time.UTC)
+	session := &fakeSession{cookie: "cookie-new", uid: 1965145, codePublicAt: joinedAt}
+
+	f := newFixture(t, true, []*model.Account{acc}, map[uint]*fakeSession{1: session})
+	enableJoinOpenSource(f)
+	if _, err := f.pool.Warmup(context.Background()); err != nil {
+		t.Fatalf("Warmup: %v", err)
+	}
+
+	res, err := f.pool.Sweep(context.Background())
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if res.Relogged != 1 {
+		t.Fatalf("SweepResult = %+v", res)
+	}
+	if got := session.CodePublicCalls(); got != 1 {
+		t.Errorf("重登成功应补做加入，实际 %d 次", got)
+	}
+	if f.store.openSourceCount() != 1 {
+		t.Errorf("应落库一次加入记录，实际 %d", f.store.openSourceCount())
+	}
+	if got := f.pool.Stats().Online; got != 1 {
+		t.Errorf("Online = %d, want 1", got)
+	}
+}
+
+// 核心约束：加入失败绝不影响账号可用性，也不占用 last_error/next_verify_at
+func TestJoinCodePublicFailureKeepsAccountServingAndRetries(t *testing.T) {
+	acc := activeAccount(1, "u1", "cookie-1")
+	session := &fakeSession{
+		cookie:        "cookie-1",
+		uid:           1965145,
+		codePublicErr: &sdk.NetworkError{Err: errors.New("i/o timeout")},
+	}
+
+	f := newFixture(t, true, []*model.Account{acc}, map[uint]*fakeSession{1: session})
+	enableJoinOpenSource(f)
+	if _, err := f.pool.Warmup(context.Background()); err != nil {
+		t.Fatalf("Warmup: %v", err)
+	}
+
+	res, err := f.pool.Sweep(context.Background())
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	if res.OK != 1 || res.Declared != 0 {
+		t.Errorf("SweepResult = %+v，加入失败不该改变验证结论", res)
+	}
+	if got := f.pool.Stats().Online; got != 1 {
+		t.Errorf("Online = %d, want 1（账号照常在线）", got)
+	}
+	if !f.pool.getSession(1).isServing() {
+		t.Error("账号应继续参与选号")
+	}
+	if f.store.stateCount() != 0 {
+		t.Errorf("不应写 online/status，实际 %+v", f.store.states)
+	}
+	if len(f.store.transients) != 0 {
+		t.Errorf("加入失败也不该占用 last_error/next_verify_at，实际 %+v", f.store.transients)
+	}
+	if f.store.openSourceCount() != 0 {
+		t.Errorf("失败不应落库加入记录，实际 %d", f.store.openSourceCount())
+	}
+	if f.pool.getSession(1).snapshot().OpenSourceJoined {
+		t.Error("失败后不应标记为已加入")
+	}
+
+	// 下一轮验证继续重试（而不是永久放弃，也不是热循环）
+	if _, err := f.pool.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if got := session.CodePublicCalls(); got != 2 {
+		t.Errorf("应在下一轮重试，实际调用 %d 次", got)
+	}
+}
+
+// 开关默认关闭：不发请求、不落库
+func TestJoinCodePublicDisabledByDefault(t *testing.T) {
+	acc := activeAccount(1, "u1", "cookie-1")
+	session := &fakeSession{cookie: "cookie-1", uid: 1965145}
+
+	f := newFixture(t, true, []*model.Account{acc}, map[uint]*fakeSession{1: session})
+	if f.pool.cfg.Account.JoinOpenSource {
+		t.Fatal("前置条件：默认应为关闭")
+	}
+	if _, err := f.pool.Warmup(context.Background()); err != nil {
+		t.Fatalf("Warmup: %v", err)
+	}
+	if _, err := f.pool.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	if got := session.CodePublicCalls(); got != 0 {
+		t.Errorf("开关关闭时不应请求，实际 %d 次", got)
+	}
+	if f.store.openSourceCount() != 0 {
+		t.Errorf("开关关闭时不应落库，实际 %d", f.store.openSourceCount())
+	}
+}
+
+// 洛谷没给出加入时间时用本进程时钟兜底（仅用于展示"何时可退出"）
+func TestJoinCodePublicFallsBackToLocalClock(t *testing.T) {
+	acc := activeAccount(1, "u1", "cookie-1")
+	session := &fakeSession{cookie: "cookie-1", uid: 1965145} // codePublicAt 为零值
+
+	f := newFixture(t, true, []*model.Account{acc}, map[uint]*fakeSession{1: session})
+	enableJoinOpenSource(f)
+	if _, err := f.pool.Warmup(context.Background()); err != nil {
+		t.Fatalf("Warmup: %v", err)
+	}
+	if _, err := f.pool.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	if f.store.openSourceCount() != 1 {
+		t.Fatalf("应落库一次加入记录，实际 %d", f.store.openSourceCount())
+	}
+	if got := f.store.openSource[0].joinedAt; !got.Equal(testNow) {
+		t.Errorf("加入时间 = %v, want %v", got, testNow)
+	}
+}
+
+// 落库失败也不能让账号出问题：远端已加入就地标记，库恢复后下一轮补上
+func TestJoinCodePublicStoreFailureKeepsAccountUsable(t *testing.T) {
+	acc := activeAccount(1, "u1", "cookie-1")
+	session := &fakeSession{cookie: "cookie-1", uid: 1965145, codePublicAt: testNow}
+
+	f := newFixture(t, true, []*model.Account{acc}, map[uint]*fakeSession{1: session})
+	enableJoinOpenSource(f)
+	if _, err := f.pool.Warmup(context.Background()); err != nil {
+		t.Fatalf("Warmup: %v", err)
+	}
+	f.store.failWrite = errors.New("db down")
+
+	res, err := f.pool.Sweep(context.Background())
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	if res.OK != 1 {
+		t.Errorf("落库失败不该影响验证结论: %+v", res)
+	}
+	if f.store.openSourceCount() != 0 {
+		t.Errorf("库不可用时不应有加入记录，实际 %d", f.store.openSourceCount())
+	}
+	if !f.pool.getSession(1).snapshot().OpenSourceJoined {
+		t.Error("远端已加入，内存快照仍应标记为已加入")
+	}
+	if stats := f.pool.Stats(); stats.Online != 1 {
+		t.Errorf("Stats = %+v, want Online=1", stats)
+	}
+
+	// 数据库恢复后，下一轮验证会把这条记录补上（远端已是 1，SDK 只读不写）
+	f.store.failWrite = nil
+	if _, err := f.pool.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if f.store.openSourceCount() != 1 {
+		t.Errorf("库恢复后应补落库，实际 %d", f.store.openSourceCount())
 	}
 }

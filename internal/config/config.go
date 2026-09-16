@@ -41,6 +41,9 @@ const (
 	defaultAccountFailedRetry     = time.Hour
 	defaultAccountRequestMaxTry   = 3
 	defaultAccountSweepBatchLimit = 200
+	// 加入"代码公开计划"是不可逆动作（洛谷限制 30 天内不能退出），
+	// 因此默认关闭，必须显式开启。
+	defaultAccountJoinOpenSource = false
 
 	// 验证码识别服务
 	defaultOCRTimeout = 5 * time.Second
@@ -127,6 +130,13 @@ type Account struct {
 	FailedRetry       time.Duration // relogin_failed 的慢速重试间隔上限
 	RequestMaxTry     int           // 请求路径最多换几个账号
 	SweepBatchLimit   int           // 单轮扫描最多处理多少个账号
+
+	// JoinOpenSource 是否让池内账号加入洛谷"代码公开计划"（openSource=1）。
+	//
+	// 开启后由号池在"登录成功后 / 每轮验证成功后"幂等地补做，成功一次即永久跳过；
+	// 失败只记日志、下轮重试，不影响账号可用性。默认关闭：加入后洛谷限制 30 天
+	// 内不能退出，属于不可逆的隐私设置变更，不该是导入账号的默认副作用。
+	JoinOpenSource bool
 }
 
 // OCR 验证码识别服务配置（SDK 不内置 OCR，自动重登依赖它）
@@ -184,6 +194,7 @@ func Load() (Config, error) {
 			FailedRetry:       envDuration("ACCOUNT_FAILED_RETRY", defaultAccountFailedRetry),
 			RequestMaxTry:     envInt("ACCOUNT_REQUEST_MAX_TRY", defaultAccountRequestMaxTry),
 			SweepBatchLimit:   envInt("ACCOUNT_SWEEP_BATCH_LIMIT", defaultAccountSweepBatchLimit),
+			JoinOpenSource:    envBool("ACCOUNT_JOIN_OPEN_SOURCE", defaultAccountJoinOpenSource),
 		},
 		OCR: OCR{
 			URL:     strings.TrimSpace(os.Getenv("LUOGU_OCR_URL")),

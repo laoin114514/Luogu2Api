@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	sdk "github.com/laoin114514/luoguClient"
 
@@ -34,6 +35,13 @@ type SessionClient interface {
 	Login(username, password, captcha string) error
 	Verify() error
 	UserProfile() (model.LuoguProfile, error)
+
+	// EnsureCodePublic 确保账号已加入洛谷"代码公开计划"（openSource=1），幂等。
+	//
+	// 远端已是 1 时只读一次偏好、不写；否则读-改-写整份偏好（该接口是
+	// 全量替换语义，只发一个字段会把其它偏好重置成平台默认值）。
+	// 返回洛谷记录的加入时间；洛谷未给出时返回零值，由调用方兜底。
+	EnsureCodePublic() (time.Time, error)
 
 	// SDK 返回底层客户端，仅供本包的业务适配方法使用
 	SDK() *sdk.Client
@@ -113,4 +121,25 @@ func (s *sdkSession) UserProfile() (model.LuoguProfile, error) {
 		Background: detail.Background,
 		RawJSON:    string(raw),
 	}, nil
+}
+
+// EnsureCodePublic 确保账号已加入洛谷"代码公开计划"（幂等）。
+//
+// 读-改-写与"必须复核落库结果"的逻辑放在 SDK 的 UserService.JoinOpenSourcePlan
+// （那里能用 httptest 覆盖；本包无法把 SDK 指向测试服务器，见 SessionClient 的说明），
+// 这里只做 int64 时间戳到 time.Time 的转换与零值语义统一。
+func (s *sdkSession) EnsureCodePublic() (time.Time, error) {
+	joinTime, err := s.client.User.JoinOpenSourcePlan()
+	if err != nil {
+		return time.Time{}, err
+	}
+	return unixTime(joinTime), nil
+}
+
+// unixTime 把洛谷的 Unix 秒时间戳转成 time.Time（<=0 视为未知，返回零值）
+func unixTime(sec int64) time.Time {
+	if sec <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(sec, 0)
 }

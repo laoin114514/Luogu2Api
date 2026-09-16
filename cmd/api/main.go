@@ -42,6 +42,9 @@ func main() {
 }
 
 func run(addrOverride string) error {
+	// 配置只来自环境变量（见 configs/env.example）。本地开发用 scripts/dev.ps1
+	// 把 configs/.env 导出到当前会话；容器里由 compose/k8s 注入——二进制刻意
+	// 不读 .env，避免"镜像里残留一个 .env 就把忘记配置的变量悄悄补上"。
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -129,6 +132,7 @@ func run(addrOverride string) error {
 			"env", cfg.App.Env,
 			"admin_enabled", cfg.Admin.Enabled(),
 			"sweep_interval", cfg.Account.SweepInterval.String(),
+			"join_open_source", cfg.Account.JoinOpenSource,
 		)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
