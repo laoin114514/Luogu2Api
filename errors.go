@@ -3,8 +3,17 @@ package luoguclient
 import "fmt"
 
 // AuthError 登录/认证失败
+//
+// 洛谷登录失败（HTTP 400）响应形如：
+//
+//	{"errorCode":400,"errorType":"LuoguWeb\\Spilopelia\\Exception\\CaptchaNotMatchException",
+//	 "errorMessage":"图形验证码错误","errorData":{":":0}}
+//
+// Type 即 errorType 中的异常类名，可用于区分失败原因，
+// 例如 CaptchaNotMatchException（验证码错误，换一张重试即可）。
 type AuthError struct {
 	Code    int
+	Type    string
 	Message string
 }
 

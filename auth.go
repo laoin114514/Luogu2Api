@@ -1,9 +1,11 @@
 package luoguclient
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 )
 
 // AuthService 认证服务
@@ -42,14 +44,7 @@ func (a *AuthService) Login(username, password, captcha string) (*LoginResponse,
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		var errResp struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-		}
-		if parseErr := parseBody(resp, &errResp); parseErr == nil && errResp.Message != "" {
-			return nil, &AuthError{Code: errResp.Code, Message: errResp.Message}
-		}
-		return nil, &AuthError{Code: resp.StatusCode, Message: "login failed"}
+		return nil, loginError(resp)
 	}
 
 	var result LoginResponse
@@ -58,6 +53,60 @@ func (a *AuthService) Login(username, password, captcha string) (*LoginResponse,
 	}
 
 	return &result, nil
+}
+
+// loginError 把登录失败响应转换成 *AuthError（调用方负责关闭 resp.Body）
+//
+// 实测失败响应（HTTP 400）为：
+//
+//	{"errorCode":400,"errorType":"LuoguWeb\\Spilopelia\\Exception\\CaptchaNotMatchException",
+//	 "errorMessage":"图形验证码错误","errorData":{":":0}}
+//
+// 旧字段 code/message 仍作兼容解析。
+func loginError(resp *http.Response) error {
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return &AuthError{Code: resp.StatusCode, Message: "login failed (read body: " + err.Error() + ")"}
+	}
+
+	var errResp struct {
+		ErrorCode    int    `json:"errorCode"`
+		ErrorType    string `json:"errorType"`
+		ErrorMessage string `json:"errorMessage"`
+		Code         int    `json:"code"`
+		Message      string `json:"message"`
+	}
+	if json.Unmarshal(data, &errResp) == nil {
+		code := errResp.ErrorCode
+		if code == 0 {
+			code = errResp.Code
+		}
+		message := errResp.ErrorMessage
+		if message == "" {
+			message = errResp.Message
+		}
+		if message == "" {
+			message = "login failed"
+		}
+		if errResp.ErrorType != "" || message != "login failed" {
+			return &AuthError{Code: code, Type: errResp.ErrorType, Message: message}
+		}
+	}
+
+	// 响应不是预期 JSON：保留原文片段，避免丢失失败原因
+	return &AuthError{
+		Code:    resp.StatusCode,
+		Message: fmt.Sprintf("login failed, body: %s", truncateRunes(strings.TrimSpace(string(data)), 200)),
+	}
+}
+
+// truncateRunes 按字符截断，避免切断 UTF-8
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "..."
 }
 
 // LoginWithSolver 使用 CaptchaSolver 自动获取验证码并登录

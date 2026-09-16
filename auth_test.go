@@ -179,3 +179,101 @@ func TestUnauthorizedErrorMessage(t *testing.T) {
 		t.Errorf("zero value message = %q", got)
 	}
 }
+
+// 登录失败要透出洛谷的真实原因（errorType / errorMessage），而不是笼统的 "login failed"
+func TestLoginFailureSurfacesLuoguError(t *testing.T) {
+	// 实测响应（HTTP 400，验证码错误）
+	const body = `{"errorCode":400,"errorType":"LuoguWeb\\Spilopelia\\Exception\\CaptchaNotMatchException",` +
+		`"errorMessage":"图形验证码错误","errorData":{":":0}}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+
+	_, err := c.Auth.Login("someone", "secret", "zzzz")
+	var authErr *AuthError
+	if !errors.As(err, &authErr) {
+		t.Fatalf("err = %v (%T), want *AuthError", err, err)
+	}
+	if authErr.Code != 400 {
+		t.Errorf("Code = %d, want 400", authErr.Code)
+	}
+	if authErr.Type != `LuoguWeb\Spilopelia\Exception\CaptchaNotMatchException` {
+		t.Errorf("Type = %q", authErr.Type)
+	}
+	if authErr.Message != "图形验证码错误" {
+		t.Errorf("Message = %q, want 图形验证码错误", authErr.Message)
+	}
+	if !strings.Contains(authErr.Error(), "图形验证码错误") {
+		t.Errorf("Error() 应包含真实原因: %v", authErr)
+	}
+}
+
+// 旧字段 code/message 仍然兼容
+func TestLoginFailureLegacyErrorShape(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"code":403,"message":"wrong password"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+
+	_, err := c.Auth.Login("someone", "secret", "abcd")
+	var authErr *AuthError
+	if !errors.As(err, &authErr) {
+		t.Fatalf("err = %v (%T), want *AuthError", err, err)
+	}
+	if authErr.Code != 403 || authErr.Message != "wrong password" {
+		t.Errorf("AuthError = %+v", authErr)
+	}
+}
+
+// 响应不是预期 JSON 时，错误里要保留原文片段
+func TestLoginFailureNonJSONBody(t *testing.T) {
+	// 用 400（非 5xx）以免触发重试退避
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("<html>400 Bad Request</html>"))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+
+	_, err := c.Auth.Login("someone", "secret", "abcd")
+	var authErr *AuthError
+	if !errors.As(err, &authErr) {
+		t.Fatalf("err = %v (%T), want *AuthError", err, err)
+	}
+	if authErr.Code != http.StatusBadRequest {
+		t.Errorf("Code = %d, want 400", authErr.Code)
+	}
+	if !strings.Contains(authErr.Message, "400 Bad Request") {
+		t.Errorf("Message 应保留响应原文: %q", authErr.Message)
+	}
+}
+
+// 登录成功响应体只含 username/locked/syncToken/redirectTo（实测）
+func TestLoginSuccessResponseShape(t *testing.T) {
+	const body = `{"username":"littlekaf","locked":false,"syncToken":"xxx+1965145","redirectTo":"/"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := newTestClient(t, srv)
+
+	resp, err := c.Auth.Login("littlekaf", "secret", "abcd")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if resp.Username != "littlekaf" || resp.Locked || resp.SyncToken != "xxx+1965145" || resp.RedirectTo != "/" {
+		t.Errorf("LoginResponse = %+v", resp)
+	}
+}
