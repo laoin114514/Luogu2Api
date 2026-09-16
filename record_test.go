@@ -13,7 +13,7 @@ func TestRecordGetListParsesLentilleContext(t *testing.T) {
 	const body = `{"status":200,"data":{"records":{"result":[` +
 		`{"id":101,"status":12,"score":100,"time":15,"memory":1024,"sourceCodeLength":42,` +
 		`"language":14,"enableO2":true,` +
-		`"problem":{"pid":"P1001","title":"A+B Problem","difficulty":1},` +
+		`"problem":{"pid":"P1001","name":"A+B Problem","difficulty":1,"submitted":true,"accepted":true},` +
 		`"user":{"uid":42,"name":"tester"}}],` +
 		`"count":7,"perPage":20}}}`
 
@@ -40,7 +40,11 @@ func TestRecordGetListParsesLentilleContext(t *testing.T) {
 		t.Errorf("Language = %d, want %d", rec.Language, LangGo)
 	}
 	if rec.Problem.PID != "P1001" || rec.Problem.Title != "A+B Problem" {
+		// 洛谷该字段名为 name（不是 title），标签写错会让标题永远为空
 		t.Errorf("Problem = %+v", rec.Problem)
+	}
+	if !rec.Problem.Submitted || !rec.Problem.Accepted {
+		t.Errorf("Problem.Submitted/Accepted = %v/%v", rec.Problem.Submitted, rec.Problem.Accepted)
 	}
 	if rec.User.UID != 42 || rec.User.Name != "tester" {
 		t.Errorf("User = %+v", rec.User)
@@ -91,12 +95,17 @@ func TestRecordGetListQueryParams(t *testing.T) {
 }
 
 func TestRecordGetDetailParsesSourceAndJudgeDetail(t *testing.T) {
+	// 结构按线上实测取样：testCases 是**数组**；compileResult.message 为 null；
+	// judgeResult 这一层的 score/time/memory/status 实测恒为 0。
 	const body = `{"data":{"record":{"id":101,"status":12,"score":100,"time":15,"memory":1024,"language":14,` +
 		`"sourceCode":"package main\n\nfunc main() {}",` +
-		`"problem":{"pid":"P1001"},` +
-		`"detail":{"compileResult":{"success":true,"message":""},` +
-		`"judgeResult":{"status":12,"finishedCaseCount":1,"score":100,"time":15,"memory":1024,` +
-		`"subtasks":[{"id":1,"score":100,"status":12,"testCases":{"1":{"id":1,"status":12,"time":1,"memory":256,"description":"ok accepted"}}}]}}}}}`
+		`"problem":{"pid":"P1001","name":"A+B Problem"},` +
+		`"detail":{"compileResult":{"success":true,"message":null,"opt2":false},` +
+		`"judgeResult":{"status":0,"finishedCaseCount":6,"score":0,"time":0,"memory":0,` +
+		`"subtasks":[{"id":1,"score":100,"status":12,"judger":"","time":31,"memory":2904,"testCases":[` +
+		`{"id":5,"status":12,"time":31,"memory":2904,"score":0,"signal":0,"exitCode":0,"description":"ok accepted","subtaskID":1},` +
+		`{"id":3,"status":6,"time":42,"memory":2920,"score":20,"signal":0,"exitCode":0,"description":"wrong answer On line 1","subtaskID":1}` +
+		`]}]}}}}}`
 
 	c := newTestClient(t, serveLentille(t, body))
 
@@ -110,18 +119,37 @@ func TestRecordGetDetailParsesSourceAndJudgeDetail(t *testing.T) {
 	if !rec.Detail.CompileResult.Success {
 		t.Error("compile result should be success")
 	}
-	if rec.Detail.JudgeResult.FinishedCaseCount != 1 || rec.Detail.JudgeResult.Score != 100 {
-		t.Errorf("judge result = %+v", rec.Detail.JudgeResult)
+	if rec.Detail.CompileResult.Opt2 {
+		t.Error("opt2 should be false")
+	}
+	if rec.Detail.CompileResult.Message != "" {
+		t.Errorf("null message should decode to empty string, got %q", rec.Detail.CompileResult.Message)
+	}
+	if rec.Detail.JudgeResult.FinishedCaseCount != 6 {
+		t.Errorf("FinishedCaseCount = %d, want 6", rec.Detail.JudgeResult.FinishedCaseCount)
+	}
+	if rec.Detail.JudgeResult.Score != 0 {
+		// 线上该层恒为 0；总分在 RecordSummary.Score
+		t.Errorf("judgeResult.Score = %d, want 0（实测该层不汇总）", rec.Detail.JudgeResult.Score)
 	}
 	if len(rec.Detail.JudgeResult.Subtasks) != 1 {
 		t.Fatalf("subtasks = %d, want 1", len(rec.Detail.JudgeResult.Subtasks))
 	}
-	tc, ok := rec.Detail.JudgeResult.Subtasks[0].TestCases["1"]
-	if !ok {
-		t.Fatalf("testcase 1 missing: %+v", rec.Detail.JudgeResult.Subtasks[0].TestCases)
+	sub := rec.Detail.JudgeResult.Subtasks[0]
+	if sub.ID != 1 || sub.Status != StatusAccepted || sub.Memory != 2904 {
+		t.Errorf("subtask = %+v", sub)
 	}
-	if tc.Status != TestCaseAccepted || tc.Description != "ok accepted" {
-		t.Errorf("testcase = %+v", tc)
+	if len(sub.TestCases) != 2 {
+		t.Fatalf("testCases = %d, want 2（真实数据是数组）", len(sub.TestCases))
+	}
+	if sub.TestCases[0].Status != TestCaseAccepted || sub.TestCases[0].Description != "ok accepted" {
+		t.Errorf("testcase[0] = %+v", sub.TestCases[0])
+	}
+	if sub.TestCases[1].Status != TestCaseWrongAnswer || !strings.Contains(sub.TestCases[1].Description, "wrong answer") {
+		t.Errorf("testcase[1] = %+v", sub.TestCases[1])
+	}
+	if sub.TestCases[1].SubtaskID != 1 || sub.TestCases[1].Score != 20 {
+		t.Errorf("testcase[1] 字段 = %+v", sub.TestCases[1])
 	}
 }
 

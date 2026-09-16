@@ -10,10 +10,19 @@ type LoginRequest struct {
 	Captcha  string `json:"captcha"`
 }
 
-// LoginResponse 登录响应（会话由 HTTP cookie 维护，此处字段供参考）
+// LoginResponse 登录响应
+//
+// 洛谷登录成功后通过 Set-Cookie 建立会话，响应体只有下列字段（实测）：
+//
+//	{"username":"xxx","locked":false,"syncToken":"...","redirectTo":"/"}
+//
+// 响应里**不含 uid**；需要 UID 请用 Client.UID()（读 _uid cookie），
+// 判断登录是否成功请用 AuthService.IsAuthenticated()。
 type LoginResponse struct {
-	UID      int    `json:"uid"`
-	ClientID string `json:"client_id"`
+	Username   string `json:"username"`
+	Locked     bool   `json:"locked"`
+	SyncToken  string `json:"syncToken"`
+	RedirectTo string `json:"redirectTo"`
 }
 
 // Problem 题目详情（匹配洛谷 SSR 页面中 lentille-context 的实际结构）
@@ -168,13 +177,15 @@ type RecordSummary struct {
 	User             UserInfo     `json:"user"`
 }
 
-// ProblemRef 记录中的题目引用
+// ProblemRef 记录中的题目引用（实测：洛谷该字段名为 name，不是 title）
 type ProblemRef struct {
 	PID        string `json:"pid"`
-	Title      string `json:"title"`
+	Title      string `json:"name"`
 	Difficulty int    `json:"difficulty"`
 	FullScore  int    `json:"fullScore"`
 	Type       string `json:"type"`
+	Submitted  bool   `json:"submitted"`
+	Accepted   bool   `json:"accepted"`
 }
 
 // RecordDetail 记录详情（含源代码和评测详情）
@@ -194,9 +205,13 @@ type JudgeDetail struct {
 type CompileResult struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
+	Opt2    bool   `json:"opt2"`
 }
 
 // JudgeResult 评测结果
+//
+// 注意：实测 judgeResult 这一层的 time/memory/score/status 恒为 0（洛谷不再在此层汇总），
+// 有意义的数据在 Subtasks 与 Subtasks[].TestCases；总分/总状态请用 RecordSummary.Score / Status。
 type JudgeResult struct {
 	Subtasks          []SubtaskResult `json:"subtasks"`
 	FinishedCaseCount int             `json:"finishedCaseCount"`
@@ -208,12 +223,13 @@ type JudgeResult struct {
 
 // SubtaskResult 子任务结果
 type SubtaskResult struct {
-	ID        int                       `json:"id"`
-	Score     int                       `json:"score"`
-	Status    RecordStatus              `json:"status"`
-	Time      int                       `json:"time"`
-	Memory    int                       `json:"memory"`
-	TestCases map[string]TestCaseResult `json:"testCases"`
+	ID        int              `json:"id"`
+	Score     int              `json:"score"`
+	Status    RecordStatus     `json:"status"`
+	Time      int              `json:"time"`
+	Memory    int              `json:"memory"`
+	Judger    string           `json:"judger"`
+	TestCases []TestCaseResult `json:"testCases"`
 }
 
 // TestCaseResult 单个测试点结果
