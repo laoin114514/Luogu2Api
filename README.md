@@ -24,7 +24,7 @@ func main() {
     // 登录（首次需要手动输入验证码）
     if !client.Auth.IsAuthenticated() {
         client.Auth.RefreshCSRF()
-        client.Auth.LoginWithSolver("username", "password", mySolver)
+        client.Auth.LoginWithSolver("username", "password", mySolver) // mySolver 需自行实现，SDK 不内置 OCR
     }
 
     // 获取题目
@@ -103,18 +103,27 @@ luogu.LangCPP14 // 28
 
 ```
 luoguClient/
-├── client.go        # Client 核心、HTTP 请求、配置项
+├── client.go        # Client 核心、HTTP 请求、配置项、页面 JSON 解析
 ├── auth.go          # AuthService 认证
 ├── problem.go       # ProblemService 题目
 ├── record.go        # RecordService 提交记录
 ├── training.go      # TrainingService 题单
+├── user.go          # UserService 用户 / 排名
+├── discuss.go       # DiscussService 讨论
+├── contest.go       # ContestService 比赛
 ├── types.go         # 所有公开类型
 ├── constants.go     # 状态/语言常量
 ├── errors.go        # 错误类型
 ├── cookiestore.go   # Cookie 导出/导入（仅内存存储）
 ├── retry.go         # 重试逻辑
+├── api.md           # 完整 API 文档
 └── example/main.go  # 使用示例
 ```
+
+`Client` 及其 Service 可并发使用；配置项（`WithXxx`）只在 `NewClient` 构造期间生效。
+
+**验证码需要自己识别**：SDK 只定义 `CaptchaSolver` 函数类型（不内置 OCR），
+`example/main.go` 的做法是把验证码图片存成 `captcha.jpg` 后手动输入。
 
 ## 错误类型
 
@@ -122,10 +131,12 @@ luoguClient/
 &luogu.AuthError{Code: 400, Message: "login failed"}
 &luogu.CSRFError{Err: ...}
 &luogu.NetworkError{Err: ...}
-&luogu.UnauthorizedError{}
+&luogu.UnauthorizedError{StatusCode: 401, Message: "get record list"}
 ```
 
-所有自定义错误支持 `errors.Unwrap()`。
+`CSRFError` 与 `NetworkError` 支持 `errors.Unwrap()`；`AuthError` 与 `UnauthorizedError` 不包装底层错误。
+需要登录的接口（`/record/*`、`/problem/solution/*`、`/training/{id}`、`/user/setting` 等）在未登录时返回 401，
+SDK 统一转换成 `*luogu.UnauthorizedError`，可用 `errors.As` 判断；详见 `api.md`。
 
 ## 许可证
 

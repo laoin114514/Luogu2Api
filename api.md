@@ -31,6 +31,10 @@ client, err := luogu.NewClient(opts ...ClientOption)
 | `WithUserAgent(ua)` | 自定义 User-Agent |
 | `WithCookies(data)` | 创建时注入 cookie（JSON，格式同 `ExportCookies`；空数据不注入） |
 
+**并发安全：** `Client` 及其 Service 可被多个 goroutine 同时使用（`csrfToken` 由内部 `RWMutex` 保护，
+cookie jar 自身并发安全）。配置项（`WithXxx`）只在 `NewClient` 构造期间生效，请在创建时一次性传入；
+运行期需要变更的登录态用 `SetCSRF` / `ImportCookies` / `ClearCookies`。
+
 ---
 
 ## Cookie 管理
@@ -128,7 +132,7 @@ func (a *AuthService) Logout() error
 func (a *AuthService) IsAuthenticated() bool
 ```
 
-检查当前登录状态是否有效（服务端验证）。
+检查当前登录状态是否有效（服务端验证，**每次调用都会发起一次网络请求**）。
 
 ---
 
@@ -138,7 +142,9 @@ func (a *AuthService) IsAuthenticated() bool
 func (a *AuthService) Verify() error
 ```
 
-同 `IsAuthenticated`，返回 error 形式。
+同 `IsAuthenticated`，返回 error 形式。未登录时返回 `*UnauthorizedError`。
+
+洛谷对未登录访问 `/user/setting` 直接返回 **401**（旧行为是 302 重定向到登录页），两种都会被识别为未登录。
 
 ---
 
@@ -244,6 +250,8 @@ func (p *ProblemService) GetFull(pid string) (*Problem, []Translation, error)
 ---
 
 ## RecordService 记录
+
+> **需要登录**：`/record/*` 页面匿名访问返回 401（`UserUnloginException`），因此 `GetList` / `GetDetail` 未登录时返回 `*UnauthorizedError`。
 
 ### GetList
 
@@ -825,7 +833,7 @@ type ContestDetail struct {
 ## 错误类型
 
 ```go
-// 登录/认证失败
+// 登录/认证失败（用户名、密码、验证码错误等）
 type AuthError struct {
     Code    int
     Message string
@@ -837,8 +845,29 @@ type CSRFError struct{ Err error }
 // 网络请求失败
 type NetworkError struct{ Err error }
 
-// 未登录调用需认证的 API
-type UnauthorizedError struct{}
+// 未登录或权限不足（HTTP 401/403）
+type UnauthorizedError struct {
+    StatusCode int    // 触发该错误的 HTTP 状态码
+    Message    string // 触发该错误的操作描述，例如 "get problem P1001"
+}
 ```
 
 所有错误实现 `error` 接口，`CSRFError` 和 `NetworkError` 支持 `errors.Unwrap()`。
+
+### 401 / 403 的统一映射
+
+所有 Service 方法都经过 `checkResponse`：响应为 **401 或 403** 时返回 `*UnauthorizedError`，
+其余非 200 状态码返回带原始状态码的普通错误。可用 `errors.As` 判断：
+
+```go
+_, err := client.Record.GetDetail(240247732)
+var unauthorized *luogu.UnauthorizedError
+if errors.As(err, &unauthorized) {
+    // 未登录：需要先登录或恢复 cookie
+    log.Println(unauthorized.StatusCode, unauthorized.Message)
+}
+```
+
+实测需登录的端点（匿名 401）：`/record/list`、`/record/{id}`、`/problem/solution/{pid}`、
+`/training/{id}`、`/user/setting`。其中 `/record/*` 即使查询他人记录也需要登录。
+
