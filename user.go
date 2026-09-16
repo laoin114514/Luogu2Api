@@ -2,7 +2,6 @@ package luoguclient
 
 import (
 	"fmt"
-	"net/http"
 )
 
 // UserService 用户服务
@@ -19,8 +18,8 @@ func (u *UserService) Get(uid int) (*UserDetail, error) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("get user %d: status %d", uid, resp.StatusCode)
+	if err := checkResponse(resp, "get user %d", uid); err != nil {
+		return nil, err
 	}
 
 	var result struct {
@@ -46,8 +45,8 @@ func (u *UserService) GetRanking(page int) (*RankingList, error) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("get ranking: status %d", resp.StatusCode)
+	if err := checkResponse(resp, "get ranking"); err != nil {
+		return nil, err
 	}
 
 	var result struct {

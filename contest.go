@@ -2,7 +2,6 @@ package luoguclient
 
 import (
 	"fmt"
-	"net/http"
 )
 
 // ContestService 比赛服务
@@ -22,8 +21,8 @@ func (c *ContestService) GetList(page int) (*ContestList, error) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("get contest list: status %d", resp.StatusCode)
+	if err := checkResponse(resp, "get contest list"); err != nil {
+		return nil, err
 	}
 
 	var result struct {
@@ -53,14 +52,14 @@ func (c *ContestService) GetDetail(id int) (*ContestDetail, error) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("get contest %d: status %d", id, resp.StatusCode)
+	if err := checkResponse(resp, "get contest %d", id); err != nil {
+		return nil, err
 	}
 
 	var result struct {
 		Data struct {
 			Contest ContestDetail `json:"contest"`
-			Joined int          `json:"joined"`
+			Joined  int           `json:"joined"`
 		} `json:"data"`
 	}
 	if err := parseLentilleContext(resp, &result); err != nil {

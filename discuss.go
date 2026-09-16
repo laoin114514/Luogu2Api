@@ -2,7 +2,6 @@ package luoguclient
 
 import (
 	"fmt"
-	"net/http"
 	"net/url"
 	"strconv"
 )
@@ -24,15 +23,15 @@ func (d *DiscussService) GetList(page int) (*DiscussList, error) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("get discuss list: status %d", resp.StatusCode)
+	if err := checkResponse(resp, "get discuss list"); err != nil {
+		return nil, err
 	}
 
 	var result struct {
 		Data struct {
-			Posts         DiscussPosts `json:"posts"`
-			PublicForums  []DiscussForum `json:"publicForums"`
-			CanPost       bool           `json:"canPost"`
+			Posts        DiscussPosts   `json:"posts"`
+			PublicForums []DiscussForum `json:"publicForums"`
+			CanPost      bool           `json:"canPost"`
 		} `json:"data"`
 	}
 	if err := parseLentilleContext(resp, &result); err != nil {
@@ -59,15 +58,15 @@ func (d *DiscussService) GetDetail(id int, page int) (*DiscussDetail, error) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("get discuss %d: status %d", id, resp.StatusCode)
+	if err := checkResponse(resp, "get discuss %d", id); err != nil {
+		return nil, err
 	}
 
 	var result struct {
 		Data struct {
-			Post     DiscussPost   `json:"post"`
-			Replies  DiscussReplies `json:"replies"`
-			Forum    DiscussForum  `json:"forum"`
+			Post    DiscussPost    `json:"post"`
+			Replies DiscussReplies `json:"replies"`
+			Forum   DiscussForum   `json:"forum"`
 		} `json:"data"`
 	}
 	if err := parseLentilleContext(resp, &result); err != nil {

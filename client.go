@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
@@ -17,6 +18,10 @@ const defaultUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 
 const luoguBaseURL = "https://www.luogu.com.cn/"
 
 // Client 洛谷 SDK 客户端
+//
+// Client 可以并发使用：csrfToken 由 mu 保护，cookie jar 自身并发安全。
+// 配置项（WithXxx）只在 NewClient 构造期间生效，构造完成后不应再改动；
+// 运行期需要变更的登录态请使用 SetCSRF / ImportCookies / ClearCookies。
 type Client struct {
 	httpClient *http.Client
 	cookieJar  *ExportableCookieJar
@@ -26,6 +31,9 @@ type Client struct {
 	userAgent  string
 	ctx        context.Context
 	optionErr  error // Option 执行期间的错误，由 NewClient 返回
+
+	mu      sync.RWMutex // 保护 csrfToken
+	baseURL string       // 请求根地址，默认 luoguBaseURL（测试时指向 httptest 服务器）
 
 	Auth     *AuthService
 	Problem  *ProblemService
@@ -102,6 +110,7 @@ func NewClient(opts ...ClientOption) (*Client, error) {
 		backoffFn:  defaultBackoff,
 		userAgent:  defaultUA,
 		ctx:        context.Background(),
+		baseURL:    luoguBaseURL,
 		httpClient: &http.Client{
 			Jar:     jar,
 			Timeout: 30 * time.Second,
@@ -126,9 +135,17 @@ func NewClient(opts ...ClientOption) (*Client, error) {
 	return c, nil
 }
 
+// base 返回请求根地址，默认 luoguBaseURL
+func (c *Client) base() string {
+	if c.baseURL != "" {
+		return c.baseURL
+	}
+	return luoguBaseURL
+}
+
 // newRequest 创建带默认请求头的 HTTP 请求
 func (c *Client) newRequest(method, path string, body interface{}) (*http.Request, error) {
-	urlStr := luoguBaseURL + strings.TrimPrefix(path, "/")
+	urlStr := c.base() + strings.TrimPrefix(path, "/")
 
 	var bodyReader io.Reader
 	if body != nil {
@@ -150,8 +167,8 @@ func (c *Client) newRequest(method, path string, body interface{}) (*http.Reques
 	}
 	req.Header.Set("Referer", luoguBaseURL)
 
-	if c.csrfToken != "" && method != "GET" {
-		req.Header.Set("X-CSRF-TOKEN", c.csrfToken)
+	if token := c.csrf(); token != "" && method != "GET" {
+		req.Header.Set("X-CSRF-TOKEN", token)
 	}
 
 	return req, nil
@@ -226,9 +243,22 @@ func parseBody(resp *http.Response, v interface{}) error {
 	return nil
 }
 
+// checkResponse 根据响应状态码返回统一错误：
+// 401/403 → *UnauthorizedError（未登录或权限不足），其余非 200 → 普通错误。
+// format/args 描述当前操作，例如 checkResponse(resp, "get problem %s", pid)。
+func checkResponse(resp *http.Response, format string, args ...interface{}) error {
+	op := fmt.Sprintf(format, args...)
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		return &UnauthorizedError{StatusCode: resp.StatusCode, Message: op}
+	case resp.StatusCode != http.StatusOK:
+		return fmt.Errorf("%s: status %d", op, resp.StatusCode)
+	}
+	return nil
+}
+
 // parseLentilleContext 从 HTML 页面中提取 <script id="lentille-context"> 内的 JSON 数据（调用方负责关闭 resp.Body）
 func parseLentilleContext(resp *http.Response, v interface{}) error {
-
 	doc, err := goquery.NewDocumentFromReader(resp.Body)
 	if err != nil {
 		return fmt.Errorf("parse HTML: %w", err)
@@ -247,7 +277,7 @@ func parseLentilleContext(resp *http.Response, v interface{}) error {
 
 // getSimple 发送 GET 请求，使用非浏览器 UA 以获取服务端渲染的 HTML
 func (c *Client) getSimple(path string) (*http.Response, error) {
-	urlStr := luoguBaseURL + strings.TrimPrefix(path, "/")
+	urlStr := c.base() + strings.TrimPrefix(path, "/")
 	req, err := http.NewRequestWithContext(c.ctx, "GET", urlStr, nil)
 	if err != nil {
 		return nil, err
@@ -274,17 +304,33 @@ func (c *Client) refreshCSRF() error {
 		return &CSRFError{Err: fmt.Errorf("csrf token not found in page")}
 	}
 
-	c.csrfToken = token
+	c.setCSRF(token)
 	return nil
+}
+
+// setCSRF 保存 CSRF token（并发安全）
+func (c *Client) setCSRF(token string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.csrfToken = token
+}
+
+// csrf 返回当前 CSRF token（并发安全）
+func (c *Client) csrf() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.csrfToken
 }
 
 // SetCSRF 手动设置 CSRF token（用于已知 token 时跳过 RefreshCSRF）
 func (c *Client) SetCSRF(token string) {
-	c.csrfToken = token
+	c.setCSRF(token)
 }
 
 // verifyAuth 校验当前 cookie 是否仍有效
-// 访问需要登录的页面，若被重定向到登录页则说明 cookie 无效
+//
+// 洛谷当前对未登录访问 /user/setting 直接返回 401；旧行为是 302 重定向到登录页，
+// 两种都要兼容，因此先看状态码，再兜底检查重定向目标。
 func (c *Client) verifyAuth() error {
 	resp, err := c.get("/user/setting")
 	if err != nil {
@@ -292,9 +338,13 @@ func (c *Client) verifyAuth() error {
 	}
 	defer resp.Body.Close()
 
-	// 未认证 → 洛谷会 302 重定向到登录页
-	if strings.Contains(resp.Request.URL.Path, "/login") {
-		return &UnauthorizedError{}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return &UnauthorizedError{StatusCode: resp.StatusCode, Message: "verify auth"}
+	}
+
+	// 兼容旧行为：未认证 → 302 重定向到登录页
+	if resp.Request != nil && strings.Contains(resp.Request.URL.Path, "/login") {
+		return &UnauthorizedError{StatusCode: http.StatusFound, Message: "verify auth"}
 	}
 
 	if resp.StatusCode != http.StatusOK {

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"sync"
 )
 
 // exportableCookie 可序列化的 cookie 结构
@@ -19,7 +20,11 @@ type exportableCookie struct {
 
 // ExportableCookieJar 包装 cookiejar.Jar，支持将 cookie 导出为 JSON 或从 JSON 导入。
 // cookie 仅保存在内存中，持久化（写文件、数据库等）由调用方自行负责。
+//
+// 所有方法都可以并发调用：内部的 cookiejar.Jar 本身并发安全，指针替换（Clear）
+// 由 mu 保护。
 type ExportableCookieJar struct {
+	mu  sync.RWMutex
 	jar *cookiejar.Jar
 }
 
@@ -33,10 +38,14 @@ func newExportableCookieJar() (*ExportableCookieJar, error) {
 
 // SetCookies 设置 cookie 到内存（不落盘，调用方可通过 Client.ExportCookies 导出）
 func (j *ExportableCookieJar) SetCookies(u *url.URL, cookies []*http.Cookie) {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
 	j.jar.SetCookies(u, cookies)
 }
 
 func (j *ExportableCookieJar) Cookies(u *url.URL) []*http.Cookie {
+	j.mu.RLock()
+	defer j.mu.RUnlock()
 	return j.jar.Cookies(u)
 }
 
@@ -46,6 +55,8 @@ func (j *ExportableCookieJar) Clear() error {
 	if err != nil {
 		return err
 	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
 	j.jar = newJar
 	return nil
 }
@@ -56,7 +67,7 @@ func (j *ExportableCookieJar) Export() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	cookies := j.jar.Cookies(u)
+	cookies := j.Cookies(u)
 	exported := make([]exportableCookie, 0, len(cookies))
 	for _, c := range cookies {
 		domain := c.Domain
@@ -101,7 +112,7 @@ func (j *ExportableCookieJar) Import(data []byte) error {
 		if path == "" {
 			path = "/"
 		}
-		j.jar.SetCookies(u, []*http.Cookie{{
+		j.SetCookies(u, []*http.Cookie{{
 			Name:     c.Name,
 			Value:    c.Value,
 			Domain:   domain,

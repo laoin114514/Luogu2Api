@@ -2,7 +2,6 @@ package luoguclient
 
 import (
 	"fmt"
-	"net/http"
 	"net/url"
 	"strconv"
 )
@@ -21,8 +20,8 @@ func (p *ProblemService) Get(pid string) (*Problem, error) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("get problem %s: status %d", pid, resp.StatusCode)
+	if err := checkResponse(resp, "get problem %s", pid); err != nil {
+		return nil, err
 	}
 
 	var result struct {
@@ -55,8 +54,8 @@ func (p *ProblemService) Search(params SearchParams) (*SearchResult, error) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("search problems: status %d", resp.StatusCode)
+	if err := checkResponse(resp, "search problems"); err != nil {
+		return nil, err
 	}
 
 	var result struct {
@@ -92,8 +91,8 @@ func (p *ProblemService) GetSolutions(pid string, page int) (*SolutionList, erro
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("get solutions for %s: status %d", pid, resp.StatusCode)
+	if err := checkResponse(resp, "get solutions for %s", pid); err != nil {
+		return nil, err
 	}
 
 	var result struct {
@@ -127,8 +126,8 @@ func (p *ProblemService) GetSolutionDetail(sid string) (*Solution, error) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("get solution %s: status %d", sid, resp.StatusCode)
+	if err := checkResponse(resp, "get solution %s", sid); err != nil {
+		return nil, err
 	}
 
 	var result struct {
@@ -154,8 +153,8 @@ func (p *ProblemService) GetTranslation(pid string) ([]Translation, error) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("get translation for %s: status %d", pid, resp.StatusCode)
+	if err := checkResponse(resp, "get translation for %s", pid); err != nil {
+		return nil, err
 	}
 
 	var result struct {
@@ -186,8 +185,8 @@ func (p *ProblemService) GetFull(pid string) (*Problem, []Translation, error) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, nil, fmt.Errorf("get problem %s: status %d", pid, resp.StatusCode)
+	if err := checkResponse(resp, "get problem %s", pid); err != nil {
+		return nil, nil, err
 	}
 
 	var result struct {

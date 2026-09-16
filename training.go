@@ -2,7 +2,6 @@ package luoguclient
 
 import (
 	"fmt"
-	"net/http"
 	"net/url"
 	"strconv"
 )
@@ -34,8 +33,8 @@ func (t *TrainingService) GetList(params TrainingListParams) (*TrainingList, err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("get training list: status %d", resp.StatusCode)
+	if err := checkResponse(resp, "get training list"); err != nil {
+		return nil, err
 	}
 
 	var result struct {
@@ -65,8 +64,8 @@ func (t *TrainingService) GetDetail(tid int) (*TrainingDetail, error) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("get training %d: status %d", tid, resp.StatusCode)
+	if err := checkResponse(resp, "get training %d", tid); err != nil {
+		return nil, err
 	}
 
 	var result struct {
