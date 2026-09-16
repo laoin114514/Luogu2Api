@@ -8,12 +8,13 @@ import "time"
 // Problem 洛谷题目缓存。
 //
 // 示例实体：演示表结构约定（主键、唯一索引、注释、时间戳）。
+// 注意：GORM 会把 Go 的 int 映射成 bigint，需要窄类型时用 int32/int16 等明确宽度。
 // 目前接口尚未暴露，按业务需要增删即可。
 type Problem struct {
 	ID         uint      `gorm:"column:id;primaryKey;autoIncrement"`
 	PID        string    `gorm:"column:pid;type:varchar(32);not null;uniqueIndex:uk_pid;comment:题目编号"`
 	Title      string    `gorm:"column:title;type:varchar(255);not null;default:'';comment:题目标题"`
-	Difficulty int       `gorm:"column:difficulty;type:int;not null;default:0;comment:难度"`
+	Difficulty int32     `gorm:"column:difficulty;not null;default:0;comment:难度（1-7）"`
 	FetchedAt  time.Time `gorm:"column:fetched_at;comment:最近一次抓取时间"`
 	CreatedAt  time.Time `gorm:"column:created_at"`
 	UpdatedAt  time.Time `gorm:"column:updated_at"`
