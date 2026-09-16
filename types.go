@@ -311,6 +311,40 @@ type UserDetail struct {
 	Background string `json:"background"`
 }
 
+// UserPreference 偏好设置（账号设置 → 偏好设置页的全部可写字段）
+//
+// 实测（2026-09，账号 laoin，_version=7256d85f54190ceb）字段与含义：
+//
+//	codeFont           代码字体，nil 表示默认字体
+//	colorScheme        配色方案，nil 表示默认配色
+//	openSource         代码公开范围，取值见 OpenSourceType
+//	codeSharingWithAi  是否允许洛谷把代码用于 AI（隐私相关，默认 true）
+//	learningMode       学习模式（默认 false）
+//	messageMode        私信接收范围，取值见 MessageReceiveMode
+//	acceptPromotion    是否接收推广信息（默认 true）
+//
+// CodeFont / ColorScheme 是不透明的可空值：实测只验证过 null（默认），
+// 读取后原样回写即可，不要臆造取值。
+//
+// 服务端对**省略的字段套用平台默认值**（openSource 默认 1 = 加入代码公开计划，
+// codeSharingWithAi 默认 true），而不是"保持原值"。因此回写时必须传完整对象，
+// 推荐 `GetPreference` → 改字段 → `UpdatePreference` 的读改写流程。
+type UserPreference struct {
+	CodeFont          *string            `json:"codeFont"`
+	ColorScheme       *string            `json:"colorScheme"`
+	OpenSource        OpenSourceType     `json:"openSource"`
+	CodeSharingWithAi bool               `json:"codeSharingWithAi"`
+	LearningMode      bool               `json:"learningMode"`
+	MessageMode       MessageReceiveMode `json:"messageMode"`
+	AcceptPromotion   bool               `json:"acceptPromotion"`
+
+	// OpenSourceJoinTime 加入代码公开计划的时间（Unix 秒，0 表示未加入）。
+	//
+	// 只读：由 GetPreference 从设置页填充，UpdatePreference 不发送该字段。
+	// 洛谷限制加入后 30 天内不能退出（openSource 改回 0/-1 会被拒绝）。
+	OpenSourceJoinTime int64 `json:"-"`
+}
+
 // --- 排名 (Ranking) ---
 
 // RankingList 排名列表

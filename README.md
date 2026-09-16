@@ -2,6 +2,9 @@
 
 洛谷 (luogu.com.cn) 平台的 Go Client，覆盖认证、题目、记录、题单等核心功能。
 
+写入能力目前只有一个：账号偏好设置（`User.GetPreference` / `User.UpdatePreference`），
+其余接口均为只读。
+
 ## 安装
 
 ```bash
@@ -48,6 +51,12 @@ func main() {
     // 获取题单
     list, _ := client.Training.GetList(luogu.TrainingListParams{Page: 1})
     detail, _ := client.Training.GetDetail(list.Trainings[0].ID)
+
+    // 偏好设置：先读后写（省略字段会被服务端重置成默认值，别手写半个对象）
+    pref, _ := client.User.GetPreference()
+    pref.AcceptPromotion = false
+    updated, _ := client.User.UpdatePreference(*pref)
+    fmt.Println(updated.LearningMode, updated.OpenSource)
 }
 ```
 
@@ -99,6 +108,16 @@ luogu.TestCaseAccepted    // 12 通过
 // 编程语言
 luogu.LangGo    // 14
 luogu.LangCPP14 // 28
+
+// 偏好设置：代码公开范围
+luogu.OpenSourcePrivacyProtection // -1 完全隐私保护
+luogu.OpenSourceDisabled          // 0  不公开代码
+luogu.OpenSourceEnabled           // 1  加入代码公开计划
+
+// 偏好设置：私信接收范围
+luogu.MessageReceiveAdminOnly // 0 仅限管理员
+luogu.MessageReceiveFollowing // 1 关注的人与管理员
+luogu.MessageReceiveAnyone    // 2 所有人（拉黑的用户除外）
 ```
 
 ## 项目结构
@@ -110,7 +129,7 @@ luoguClient/
 ├── problem.go       # ProblemService 题目
 ├── record.go        # RecordService 提交记录
 ├── training.go      # TrainingService 题单
-├── user.go          # UserService 用户 / 排名
+├── user.go          # UserService 用户 / 排名 / 偏好设置
 ├── discuss.go       # DiscussService 讨论
 ├── contest.go       # ContestService 比赛
 ├── types.go         # 所有公开类型
@@ -134,11 +153,16 @@ luoguClient/
 &luogu.CSRFError{Err: ...}
 &luogu.NetworkError{Err: ...}
 &luogu.UnauthorizedError{StatusCode: 401, Message: "get record list"}
+&luogu.APIError{StatusCode: 400, Message: "加入代码公开计划未满 30 天，不能退出"}
 ```
 
-`CSRFError` 与 `NetworkError` 支持 `errors.Unwrap()`；`AuthError` 与 `UnauthorizedError` 不包装底层错误。
+`CSRFError` 与 `NetworkError` 支持 `errors.Unwrap()`；`AuthError`、`UnauthorizedError`
+与 `APIError` 不包装底层错误。
 需要登录的接口（`/record/*`、`/problem/solution/*`、`/training/{id}`、`/user/setting` 等）在未登录时返回 401，
 Client 统一转换成 `*luogu.UnauthorizedError`，可用 `errors.As` 判断；详见 `api.md`。
+
+写接口的业务拒绝（HTTP 400）转换成 `*luogu.APIError`，保留洛谷的 `errorType` 与中文文案；
+目前只有 `User.UpdatePreference` 会产生该错误。
 
 ## 许可证
 

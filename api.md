@@ -434,6 +434,76 @@ for _, item := range ranking.Items {
 
 ---
 
+### GetPreference
+
+```go
+func (u *UserService) GetPreference() (*UserPreference, error)
+```
+
+获取当前账号的偏好设置（**需要已登录**）。数据来自设置页
+`/user/setting/preference` 内嵌的 `lentille-context`（`data.setting`）。
+
+```go
+pref, _ := client.User.GetPreference()
+pref.OpenSource         // 1 = 加入代码公开计划（见表 OpenSourceType）
+pref.CodeSharingWithAi  // 是否允许代码用于 AI（隐私相关）
+pref.LearningMode       // 学习模式
+pref.MessageMode        // 2 = 所有人（见 MessageReceiveMode）
+pref.AcceptPromotion    // 是否接收推广信息
+pref.CodeFont           // 代码字体，nil = 默认
+pref.ColorScheme        // 配色方案，nil = 默认
+pref.OpenSourceJoinTime // 加入代码公开计划的时间（Unix 秒，0 = 未加入，只读）
+```
+
+未登录时洛谷对设置页返回 `302 → /login`，SDK 会识别最终落点并返回 `*UnauthorizedError`
+（而不是"页面解析失败"）。
+
+---
+
+### UpdatePreference
+
+```go
+func (u *UserService) UpdatePreference(pref UserPreference) (*UserPreference, error)
+```
+
+更新偏好设置（**需要已登录**），返回服务端落库后的完整设置。
+
+> ⚠️ **省略的字段会被重置成平台默认值，而不是"保持原值"。**
+> 实测只发 `{"learningMode":true}` 时，`openSource` 被重置成默认的 `1`（加入代码公开计划）、
+> `codeSharingWithAi` 重置成默认的 `true`、`codeFont` 重置成默认值。
+> 因此必须**先读后写**，不要手写半个对象：
+
+```go
+pref, err := client.User.GetPreference()
+if err != nil {
+    return err
+}
+pref.AcceptPromotion = false // 只改想改的字段
+updated, err := client.User.UpdatePreference(*pref)
+```
+
+本方法总是序列化全部 7 个可写字段（`codeFont`/`colorScheme` 为 nil 时发送 `null`，
+这是服务端接受的"默认"写法）；只读字段 `OpenSourceJoinTime` 不会出现在请求体里。
+
+两点实测结论：
+
+- **不校验 `X-CSRF-TOKEN`**：不带 token、甚至伪造 token 都返回 200，只要 cookie 有效即可调用，
+  因此无需先 `RefreshCSRF`。
+- 业务规则拒绝返回 HTTP 400 + `*APIError`（401/403 仍映射为 `*UnauthorizedError`）：
+
+```go
+pref.OpenSource = luogu.OpenSourcePrivacyProtection // 退出代码公开计划
+_, err = client.User.UpdatePreference(*pref)
+
+var apiErr *luogu.APIError
+if errors.As(err, &apiErr) {
+    log.Println(apiErr.StatusCode, apiErr.Message)
+    // 400 加入代码公开计划未满 30 天，不能退出
+}
+```
+
+---
+
 ## DiscussService 讨论
 
 ### GetList
@@ -785,6 +855,27 @@ type UserSummary struct {
 }
 ```
 
+### UserPreference
+
+```go
+type UserPreference struct {
+    CodeFont          *string            `json:"codeFont"`          // 代码字体，nil = 默认
+    ColorScheme       *string            `json:"colorScheme"`       // 配色方案，nil = 默认
+    OpenSource        OpenSourceType     `json:"openSource"`        // 代码公开范围
+    CodeSharingWithAi bool               `json:"codeSharingWithAi"` // 是否允许代码用于 AI
+    LearningMode      bool               `json:"learningMode"`      // 学习模式
+    MessageMode       MessageReceiveMode `json:"messageMode"`       // 私信接收范围
+    AcceptPromotion   bool               `json:"acceptPromotion"`   // 接收推广信息
+
+    // 只读：GetPreference 填充，UpdatePreference 不发送
+    OpenSourceJoinTime int64 `json:"-"`
+}
+```
+
+`GetPreference` 返回的对象可直接回写给 `UpdatePreference`（读改写闭环）。
+注意服务端对**省略的字段套用默认值**：`OpenSource` 零值是 `0`（不公开代码）、
+`MessageMode` 零值是 `0`（仅限管理员）、`LearningMode` 零值是 `false`，都不等于平台默认值。
+
 ### RankingList / RankingItem
 
 ```go
@@ -914,6 +1005,30 @@ type ContestDetail struct {
 | `LangGo` | 14 | Go | 源码匹配 |
 | `LangCPP14` | 28 | C++14 | 出现频率 |
 
+### OpenSourceType — 代码公开范围
+
+来源：洛谷前端配置 `GET /_lfe/config` 的 `UserOpenSourceType`，
+并实测写入验证（把 `openSource` 从 `1` 改回 `0`/`-1` 会被 30 天规则拒绝）。
+
+| 常量 | 值 | 含义 |
+|------|---|------|
+| `OpenSourcePrivacyProtection` | -1 | 完全隐私保护 |
+| `OpenSourceDisabled` | 0 | 不公开代码 |
+| `OpenSourceEnabled` | 1 | 加入代码公开计划 |
+
+> 加入后 30 天内不能退出：此时把 `openSource` 改成 `0`/`-1`，服务端返回
+> HTTP 400「加入代码公开计划未满 30 天，不能退出」（`*APIError`）。
+
+### MessageReceiveMode — 私信接收范围
+
+来源：同上，`UserMessageReceiveMode`。
+
+| 常量 | 值 | 含义 |
+|------|---|------|
+| `MessageReceiveAdminOnly` | 0 | 仅限管理员 |
+| `MessageReceiveFollowing` | 1 | 关注的人与管理员 |
+| `MessageReceiveAnyone` | 2 | 所有人（拉黑的用户除外） |
+
 ---
 
 ## 错误类型
@@ -937,9 +1052,21 @@ type UnauthorizedError struct {
     StatusCode int    // 触发该错误的 HTTP 状态码
     Message    string // 触发该错误的操作描述，例如 "get problem P1001"
 }
+
+// 洛谷 JSON 业务错误（非 200，响应体为 errorCode/errorType/errorMessage）
+type APIError struct {
+    StatusCode int    // HTTP 状态码，如 400
+    Code       int    // 响应体 errorCode
+    Type       string // 洛谷异常类名，如 Symfony\...\BadRequestHttpException
+    Message    string // 洛谷 errorMessage，如 "加入代码公开计划未满 30 天，不能退出"
+}
 ```
 
 所有错误实现 `error` 接口，`CSRFError` 和 `NetworkError` 支持 `errors.Unwrap()`。
+
+`APIError` 用于需要登录的**写接口**：状态码是 4xx，但真正的原因在响应体里
+（目前由 `UserService.UpdatePreference` 返回）。401/403 不会被包装成 `APIError`，
+仍然统一是 `*UnauthorizedError`。
 
 ### 401 / 403 的统一映射
 
@@ -957,4 +1084,8 @@ if errors.As(err, &unauthorized) {
 
 实测需登录的端点（匿名 401）：`/record/list`、`/record/{id}`、`/problem/solution/{pid}`、
 `/training/{id}`、`/user/setting`。其中 `/record/*` 即使查询他人记录也需要登录。
+
+例外：设置页 `/user/setting/preference` 匿名访问是 **302 → /login**（不是 401）。
+SDK 会跟随重定向并检查最终落点，同样返回 `*UnauthorizedError`，
+所以调用方不需要为这两种行为分别写分支。
 

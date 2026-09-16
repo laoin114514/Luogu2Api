@@ -25,3 +25,22 @@ const (
 	LangGo    Language = 14 // Go（源码含 package main / import）
 	LangCPP14 Language = 28 // C++14（import <bits/stdc++.h> 等特征）
 )
+
+// OpenSourceType 代码公开范围（偏好设置 openSource 字段）
+type OpenSourceType int
+
+// MessageReceiveMode 私信接收范围（偏好设置 messageMode 字段）
+type MessageReceiveMode int
+
+// --- 偏好设置常量 ---
+// 来源：洛谷前端配置接口 GET /_lfe/config 的 UserOpenSourceType / UserMessageReceiveMode
+// （2026-09 抓取，_version=7256d85f54190ceb），与设置页实测写入值一致。
+const (
+	OpenSourcePrivacyProtection OpenSourceType = -1 // 完全隐私保护
+	OpenSourceDisabled          OpenSourceType = 0  // 不公开代码
+	OpenSourceEnabled           OpenSourceType = 1  // 加入代码公开计划
+
+	MessageReceiveAdminOnly MessageReceiveMode = 0 // 仅限管理员
+	MessageReceiveFollowing MessageReceiveMode = 1 // 关注的人与管理员
+	MessageReceiveAnyone    MessageReceiveMode = 2 // 所有人（拉黑的用户除外）
+)
