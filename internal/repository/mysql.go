@@ -18,6 +18,8 @@ import (
 func NewDB(cfg config.DB) (*gorm.DB, error) {
 	db, err := gorm.Open(mysql.Open(cfg.DSN()), &gorm.Config{
 		Logger: gormlogger.Default.LogMode(logLevel(cfg.LogLevel)),
+		// 把驱动错误翻译成 gorm.ErrDuplicatedKey 等，上层无需判断 MySQL 错误码
+		TranslateError: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("连接 MySQL 失败: %w", err)

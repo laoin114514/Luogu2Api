@@ -16,7 +16,6 @@ const (
 
 	StatusDisabled      = "disabled"
 	StatusError         = "error"
-	StatusAnonymous     = "anonymous"
 	StatusAuthenticated = "authenticated"
 	StatusUnavailable   = "unavailable"
 )
@@ -26,9 +25,9 @@ type DBPinger interface {
 	Ping(ctx context.Context) error
 }
 
-// LuoguSession 洛谷会话的本地状态
-type LuoguSession interface {
-	Session() client.SessionInfo
+// PoolStats 号池状态能力（由 client.Pool 实现）
+type PoolStats interface {
+	Stats() client.Stats
 }
 
 // ComponentStatus 单个依赖的状态
@@ -37,11 +36,18 @@ type ComponentStatus struct {
 	Error  string `json:"error,omitempty"`
 }
 
-// LuoguStatus 洛谷会话状态
+// LuoguStatus 号池状态。
+//
+// 只读内存快照，不发任何网络请求：健康检查会被频繁调用，
+// 不能因为探活把洛谷打爆，也不能因为探活本身把账号验证一遍。
 type LuoguStatus struct {
-	Status     string `json:"status"`
-	UID        int    `json:"uid,omitempty"`
-	CookieFile string `json:"cookieFile,omitempty"`
+	Status         string `json:"status"`
+	Total          int    `json:"total"`
+	Online         int    `json:"online"`
+	ReloginPending int    `json:"reloginPending"`
+	ReloginFailed  int    `json:"reloginFailed"`
+	Disabled       int    `json:"disabled"`
+	LastSweepAt    string `json:"lastSweepAt,omitempty"`
 }
 
 // HealthReport 健康检查结果
@@ -53,27 +59,27 @@ type HealthReport struct {
 
 // HealthService 健康检查业务
 type HealthService struct {
-	db          DBPinger // nil 表示未启用数据库
-	luogu       LuoguSession
+	db          DBPinger // nil 表示未启用数据库（防御性分支，正常启动恒非 nil）
+	pool        PoolStats
 	pingTimeout time.Duration
 }
 
 // NewHealthService 创建健康检查服务
-func NewHealthService(db DBPinger, luogu LuoguSession) *HealthService {
-	return &HealthService{db: db, luogu: luogu, pingTimeout: 2 * time.Second}
+func NewHealthService(db DBPinger, pool PoolStats) *HealthService {
+	return &HealthService{db: db, pool: pool, pingTimeout: 2 * time.Second}
 }
 
 // Check 汇总各依赖状态。
 //
-// 数据库不可用时整体为 degraded（HTTP 层会返回 503）；
-// 未启用数据库（本地开发）视为正常。
+// 数据库不可用或号池没有在线账号时整体为 degraded（HTTP 层返回 503）：
+// 没有可用 cookie 时业务接口必然失败，探活就该把实例摘掉。
 func (s *HealthService) Check(ctx context.Context) HealthReport {
 	report := HealthReport{
 		Status: StatusOK,
 		DB:     s.checkDB(ctx),
-		Luogu:  s.checkLuogu(),
+		Luogu:  s.checkPool(),
 	}
-	if report.DB.Status == StatusError {
+	if report.DB.Status == StatusError || report.Luogu.Status == StatusUnavailable {
 		report.Status = StatusDegraded
 	}
 	return report
@@ -91,18 +97,28 @@ func (s *HealthService) checkDB(ctx context.Context) ComponentStatus {
 	return ComponentStatus{Status: StatusOK}
 }
 
-// checkLuogu 只读取本地会话状态，不做网络请求（健康检查会被频繁调用）
-func (s *HealthService) checkLuogu() LuoguStatus {
-	if s.luogu == nil {
+func (s *HealthService) checkPool() LuoguStatus {
+	if s.pool == nil {
 		return LuoguStatus{Status: StatusDisabled}
 	}
-	info := s.luogu.Session()
-	switch {
-	case !info.Configured:
-		return LuoguStatus{Status: StatusUnavailable}
-	case info.UID > 0:
-		return LuoguStatus{Status: StatusAuthenticated, UID: info.UID, CookieFile: info.CookieFile}
-	default:
-		return LuoguStatus{Status: StatusAnonymous, CookieFile: info.CookieFile}
+
+	stats := s.pool.Stats()
+	out := LuoguStatus{
+		Total:          stats.Total,
+		Online:         stats.Online,
+		ReloginPending: stats.ReloginPending,
+		ReloginFailed:  stats.ReloginFailed,
+		Disabled:       stats.Disabled,
 	}
+	if !stats.LastSweepAt.IsZero() {
+		out.LastSweepAt = stats.LastSweepAt.UTC().Format(time.RFC3339)
+	}
+
+	// 一个在线账号都没有 = 业务接口必然 503，健康检查必须如实反映
+	if stats.Online == 0 {
+		out.Status = StatusUnavailable
+		return out
+	}
+	out.Status = StatusAuthenticated
+	return out
 }

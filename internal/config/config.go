@@ -1,7 +1,8 @@
 // Package config 负责从环境变量加载服务配置。
 //
-// 所有配置均可用环境变量覆盖，便于容器化部署；本地开发不设置 DB_HOST 即以
-// 无数据库模式启动（health 中 db 会显示 disabled）。
+// 所有配置均可用环境变量覆盖，便于容器化部署。号池依赖 MySQL，
+// 因此 DB_HOST / ACCOUNT_SECRET_KEY / LUOGU_OCR_URL 都是必填项，
+// 缺失时启动即报错（fail fast），避免"服务起来了但业务全 503"。
 package config
 
 import (
@@ -10,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/laoin114514/luogu2api/internal/secret"
 )
 
 // 默认值
@@ -24,9 +27,23 @@ const (
 	defaultDBMaxIdleConns  = 10
 	defaultDBConnLifetime  = time.Hour
 	defaultDBLogLevel      = "warn"
-	defaultLuoguCookieFile = "cookies.json"
 	defaultLuoguTimeout    = 30 * time.Second
+	defaultLuoguRetry      = 1
 	defaultLogLevel        = "info"
+
+	// 号池
+	defaultAccountSweepInterval   = 5 * time.Minute
+	defaultAccountVerifyInterval  = 30 * time.Minute
+	defaultAccountVerifyJitter    = 0.2
+	defaultAccountVerifyConcurr   = 1
+	defaultAccountLoginAttempts   = 5
+	defaultAccountLoginBackoff    = time.Minute
+	defaultAccountFailedRetry     = time.Hour
+	defaultAccountRequestMaxTry   = 3
+	defaultAccountSweepBatchLimit = 200
+
+	// 验证码识别服务
+	defaultOCRTimeout = 5 * time.Second
 )
 
 // Config 服务总配置
@@ -35,6 +52,9 @@ type Config struct {
 	HTTP     HTTP
 	DB       DB
 	Luogu    Luogu
+	Account  Account
+	OCR      OCR
+	Admin    Admin
 	LogLevel string
 }
 
@@ -68,9 +88,7 @@ type DB struct {
 	LogLevel        string // silent / error / warn / info
 }
 
-// Enabled 是否启用 MySQL。
-//
-// 未设置 DB_HOST 视为不启用，这样本地没有数据库也能把服务跑起来。
+// Enabled 是否启用 MySQL
 func (d DB) Enabled() bool { return d.Host != "" }
 
 // DSN 拼接 MySQL 连接串
@@ -84,9 +102,38 @@ func (d DB) DSN() string {
 
 // Luogu 洛谷客户端配置
 type Luogu struct {
-	CookieFile string
-	Timeout    time.Duration
+	Timeout time.Duration
+	Retry   int // SDK 内部重试次数（探活/重登固定为 0，由号池自己控制尝试次数）
 }
+
+// Account 号池配置
+type Account struct {
+	SecretKey         string        // AES-GCM 密钥（hex 或 base64）
+	SweepInterval     time.Duration // 扫描器 tick 周期
+	VerifyInterval    time.Duration // 单账号多久验证一次登录态
+	VerifyJitter      float64       // 验证间隔抖动比例 [0,1)
+	VerifyConcurrency int           // 一轮扫描内的并发账号数
+	LoginMaxAttempts  int           // 单次重登任务的尝试次数上限
+	LoginBackoff      time.Duration // 重登失败的退避基数（指数增长）
+	FailedRetry       time.Duration // relogin_failed 的慢速重试间隔上限
+	RequestMaxTry     int           // 请求路径最多换几个账号
+	SweepBatchLimit   int           // 单轮扫描最多处理多少个账号
+}
+
+// OCR 验证码识别服务配置（SDK 不内置 OCR，自动重登依赖它）
+type OCR struct {
+	URL     string
+	Token   string
+	Timeout time.Duration
+}
+
+// Admin HTTP 管理接口配置
+type Admin struct {
+	Token string // 为空时不注册管理路由（fail closed）
+}
+
+// Enabled 管理接口是否可用
+func (a Admin) Enabled() bool { return a.Token != "" }
 
 // Load 从环境变量读取配置并校验
 func Load() (Config, error) {
@@ -113,8 +160,28 @@ func Load() (Config, error) {
 			LogLevel:        env("DB_LOG_LEVEL", defaultDBLogLevel),
 		},
 		Luogu: Luogu{
-			CookieFile: env("LUOGU_COOKIE_FILE", defaultLuoguCookieFile),
-			Timeout:    envDuration("LUOGU_TIMEOUT", defaultLuoguTimeout),
+			Timeout: envDuration("LUOGU_TIMEOUT", defaultLuoguTimeout),
+			Retry:   envInt("LUOGU_RETRY", defaultLuoguRetry),
+		},
+		Account: Account{
+			SecretKey:         strings.TrimSpace(os.Getenv("ACCOUNT_SECRET_KEY")),
+			SweepInterval:     envDuration("ACCOUNT_SWEEP_INTERVAL", defaultAccountSweepInterval),
+			VerifyInterval:    envDuration("ACCOUNT_VERIFY_INTERVAL", defaultAccountVerifyInterval),
+			VerifyJitter:      envFloat("ACCOUNT_VERIFY_JITTER", defaultAccountVerifyJitter),
+			VerifyConcurrency: envInt("ACCOUNT_VERIFY_CONCURRENCY", defaultAccountVerifyConcurr),
+			LoginMaxAttempts:  envInt("ACCOUNT_LOGIN_MAX_ATTEMPTS", defaultAccountLoginAttempts),
+			LoginBackoff:      envDuration("ACCOUNT_LOGIN_BACKOFF", defaultAccountLoginBackoff),
+			FailedRetry:       envDuration("ACCOUNT_FAILED_RETRY", defaultAccountFailedRetry),
+			RequestMaxTry:     envInt("ACCOUNT_REQUEST_MAX_TRY", defaultAccountRequestMaxTry),
+			SweepBatchLimit:   envInt("ACCOUNT_SWEEP_BATCH_LIMIT", defaultAccountSweepBatchLimit),
+		},
+		OCR: OCR{
+			URL:     strings.TrimSpace(os.Getenv("LUOGU_OCR_URL")),
+			Token:   strings.TrimSpace(os.Getenv("LUOGU_OCR_TOKEN")),
+			Timeout: envDuration("LUOGU_OCR_TIMEOUT", defaultOCRTimeout),
+		},
+		Admin: Admin{
+			Token: strings.TrimSpace(os.Getenv("ADMIN_TOKEN")),
 		},
 		LogLevel: env("LOG_LEVEL", defaultLogLevel),
 	}
@@ -129,21 +196,88 @@ func (c Config) validate() error {
 	if c.HTTP.Addr == "" {
 		return fmt.Errorf("config: HTTP_ADDR 不能为空")
 	}
-	if c.DB.Enabled() {
-		var missing []string
-		if c.DB.User == "" {
-			missing = append(missing, "DB_USER")
-		}
-		if c.DB.Name == "" {
-			missing = append(missing, "DB_NAME")
-		}
-		if len(missing) > 0 {
-			return fmt.Errorf("config: 已设置 DB_HOST，但缺少 %s", strings.Join(missing, "、"))
-		}
+
+	// 号池依赖 MySQL：不再支持"无数据库模式"
+	if !c.DB.Enabled() {
+		return fmt.Errorf("config: 必须配置 DB_HOST（号池依赖 MySQL）")
+	}
+	var missing []string
+	if c.DB.User == "" {
+		missing = append(missing, "DB_USER")
+	}
+	if c.DB.Name == "" {
+		missing = append(missing, "DB_NAME")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("config: 已设置 DB_HOST，但缺少 %s", strings.Join(missing, "、"))
 	}
 	if c.DB.MaxIdleConns > c.DB.MaxOpenConns {
 		return fmt.Errorf("config: DB_MAX_IDLE_CONNS(%d) 不应大于 DB_MAX_OPEN_CONNS(%d)",
 			c.DB.MaxIdleConns, c.DB.MaxOpenConns)
+	}
+
+	if c.Account.SecretKey == "" {
+		return fmt.Errorf("config: ACCOUNT_SECRET_KEY 必填（用 openssl rand -base64 32 生成）")
+	}
+	if _, err := secret.NewCipher(c.Account.SecretKey); err != nil {
+		return fmt.Errorf("config: ACCOUNT_SECRET_KEY 不可用: %w", err)
+	}
+
+	if err := c.Account.validate(); err != nil {
+		return err
+	}
+
+	if c.OCR.URL == "" {
+		return fmt.Errorf("config: LUOGU_OCR_URL 必填（SDK 不内置 OCR，自动重登依赖验证码识别服务）")
+	}
+	if !strings.HasPrefix(c.OCR.URL, "http://") && !strings.HasPrefix(c.OCR.URL, "https://") {
+		return fmt.Errorf("config: LUOGU_OCR_URL 必须以 http:// 或 https:// 开头")
+	}
+	if c.OCR.Timeout <= 0 {
+		return fmt.Errorf("config: LUOGU_OCR_TIMEOUT 必须大于 0")
+	}
+
+	if c.Luogu.Timeout <= 0 {
+		return fmt.Errorf("config: LUOGU_TIMEOUT 必须大于 0")
+	}
+	if c.Luogu.Retry < 0 {
+		return fmt.Errorf("config: LUOGU_RETRY 不能为负数")
+	}
+
+	return nil
+}
+
+func (a Account) validate() error {
+	if a.SweepInterval <= 0 {
+		return fmt.Errorf("config: ACCOUNT_SWEEP_INTERVAL 必须大于 0")
+	}
+	if a.VerifyInterval <= 0 {
+		return fmt.Errorf("config: ACCOUNT_VERIFY_INTERVAL 必须大于 0")
+	}
+	if a.VerifyInterval < a.SweepInterval {
+		return fmt.Errorf("config: ACCOUNT_VERIFY_INTERVAL(%s) 不应小于 ACCOUNT_SWEEP_INTERVAL(%s)",
+			a.VerifyInterval, a.SweepInterval)
+	}
+	if a.VerifyJitter < 0 || a.VerifyJitter >= 1 {
+		return fmt.Errorf("config: ACCOUNT_VERIFY_JITTER 必须在 [0,1) 之间，当前 %v", a.VerifyJitter)
+	}
+	if a.VerifyConcurrency < 1 {
+		return fmt.Errorf("config: ACCOUNT_VERIFY_CONCURRENCY 至少为 1")
+	}
+	if a.LoginMaxAttempts < 1 {
+		return fmt.Errorf("config: ACCOUNT_LOGIN_MAX_ATTEMPTS 至少为 1")
+	}
+	if a.LoginBackoff <= 0 {
+		return fmt.Errorf("config: ACCOUNT_LOGIN_BACKOFF 必须大于 0")
+	}
+	if a.FailedRetry <= 0 {
+		return fmt.Errorf("config: ACCOUNT_FAILED_RETRY 必须大于 0")
+	}
+	if a.RequestMaxTry < 1 {
+		return fmt.Errorf("config: ACCOUNT_REQUEST_MAX_TRY 至少为 1")
+	}
+	if a.SweepBatchLimit < 1 {
+		return fmt.Errorf("config: ACCOUNT_SWEEP_BATCH_LIMIT 至少为 1")
 	}
 	return nil
 }
@@ -179,6 +313,18 @@ func envBool(key string, def bool) bool {
 		return def
 	}
 	return b
+}
+
+func envFloat(key string, def float64) float64 {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return def
+	}
+	return f
 }
 
 func envDuration(key string, def time.Duration) time.Duration {

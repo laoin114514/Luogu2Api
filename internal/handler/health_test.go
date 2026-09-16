@@ -18,9 +18,9 @@ type stubChecker struct {
 	report service.HealthReport
 }
 
-func (s stubChecker) Check(ctx context.Context) service.HealthReport { return s.report }
+func (s stubChecker) Check(context.Context) service.HealthReport { return s.report }
 
-func newTestEngine(report service.HealthReport) *gin.Engine {
+func newHealthEngine(report service.HealthReport) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	r.GET("/healthz", NewHealthHandler(stubChecker{report: report}).Get)
@@ -38,10 +38,14 @@ func TestHealthOK(t *testing.T) {
 	report := service.HealthReport{
 		Status: service.StatusOK,
 		DB:     service.ComponentStatus{Status: service.StatusOK},
-		Luogu:  service.LuoguStatus{Status: service.StatusAuthenticated, UID: 1965145},
+		Luogu: service.LuoguStatus{
+			Status: service.StatusAuthenticated,
+			Total:  2,
+			Online: 2,
+		},
 	}
 
-	rec := doGet(t, newTestEngine(report))
+	rec := doGet(t, newHealthEngine(report))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
@@ -54,8 +58,8 @@ func TestHealthOK(t *testing.T) {
 	if body.Code != response.CodeOK || body.Message != service.StatusOK {
 		t.Errorf("body = %+v", body)
 	}
-	if !strings.Contains(rec.Body.String(), "1965145") {
-		t.Errorf("响应应包含 UID: %s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), `"online":2`) {
+		t.Errorf("响应应包含号池在线数: %s", rec.Body.String())
 	}
 }
 
@@ -63,14 +67,18 @@ func TestHealthDegradedReturns503(t *testing.T) {
 	report := service.HealthReport{
 		Status: service.StatusDegraded,
 		DB:     service.ComponentStatus{Status: service.StatusError, Error: "connection refused"},
+		Luogu:  service.LuoguStatus{Status: service.StatusUnavailable},
 	}
 
-	rec := doGet(t, newTestEngine(report))
+	rec := doGet(t, newHealthEngine(report))
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", rec.Code)
 	}
 	if !strings.Contains(rec.Body.String(), "connection refused") {
 		t.Errorf("响应应包含失败原因: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), service.StatusUnavailable) {
+		t.Errorf("响应应包含号池不可用状态: %s", rec.Body.String())
 	}
 }

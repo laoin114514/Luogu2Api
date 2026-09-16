@@ -1,7 +1,8 @@
 // Command api 是 Luogu2Api 的 HTTP 服务入口。
 //
-// 启动顺序：加载配置 → 初始化日志 → 连接 MySQL（可选）→ 初始化洛谷客户端
-// → 组装 service/handler → 启动 gin → 等待退出信号 → 优雅关闭。
+// 启动顺序：加载配置 → 初始化日志 → 连接 MySQL（必填，号池依赖）→ 初始化
+// 凭据加解密 → 组装号池并预热 → 组装 service/handler → 启动 gin 与号池扫描器
+// → 等待退出信号 → 优雅关闭（先停 HTTP，再停扫描器，最后关数据库）。
 package main
 
 import (
@@ -14,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -24,6 +26,7 @@ import (
 	"github.com/laoin114514/luogu2api/internal/handler"
 	"github.com/laoin114514/luogu2api/internal/repository"
 	"github.com/laoin114514/luogu2api/internal/router"
+	"github.com/laoin114514/luogu2api/internal/secret"
 	"github.com/laoin114514/luogu2api/internal/service"
 )
 
@@ -50,42 +53,54 @@ func run(addrOverride string) error {
 	logger := newLogger(cfg)
 	slog.SetDefault(logger)
 
-	// 收到 SIGINT/SIGTERM 后取消 ctx，触发优雅关闭
+	// 收到 SIGINT/SIGTERM 后取消 ctx：既是 SDK 请求的默认 context，也触发优雅关闭
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// 基础设施：MySQL（未配置 DB_HOST 时为 nil，以无数据库模式运行）
+	// 基础设施：MySQL（号池依赖它，配置校验保证 DB_HOST 必填）
 	db, err := initDB(cfg, logger)
 	if err != nil {
 		return err
 	}
-	if db != nil {
-		defer func() {
-			if err := repository.Close(db); err != nil {
-				logger.Warn("关闭数据库连接失败", "err", err)
-			}
-		}()
-	}
+	defer func() {
+		if err := repository.Close(db); err != nil {
+			logger.Warn("关闭数据库连接失败", "err", err)
+		}
+	}()
 
-	// 基础设施：洛谷客户端
-	luoguClient, err := client.NewLuogu(ctx, cfg.Luogu, logger)
+	// 凭据加解密（config.Load 已校验密钥可用，这里只做构造）
+	cipher, err := secret.NewCipher(cfg.Account.SecretKey)
 	if err != nil {
-		return err
+		return fmt.Errorf("初始化凭据加解密失败: %w", err)
+	}
+	accountRepo := repository.NewAccountRepository(db, cipher)
+
+	// 号池：一个账号一个 SDK client，先预热再开始服务
+	pool := client.NewPool(ctx, cfg, accountRepo, logger)
+	warm, err := pool.Warmup(ctx)
+	if err != nil {
+		return fmt.Errorf("号池预热失败: %w", err)
+	}
+	logger.Info("号池预热完成",
+		"total", warm.Total, "serving", warm.Serving, "pending", warm.Pending, "failed", warm.Failed)
+	if warm.Total == 0 {
+		logger.Warn("号池为空：请通过管理接口导入账号（未配置 ADMIN_TOKEN 时管理路由不会注册）")
 	}
 
 	// 依赖注入：service 依赖 repository/client 的窄接口，handler 依赖 service
-	// 注意：db 为 nil 时不能直接塞进接口（会得到非 nil 的接口值），这里显式判断
-	var pinger service.DBPinger
-	if db != nil {
-		pinger = repository.NewHealthRepository(db)
-	}
-	healthService := service.NewHealthService(pinger, luoguClient)
-	healthHandler := handler.NewHealthHandler(healthService)
+	healthService := service.NewHealthService(repository.NewHealthRepository(db), pool)
+	accountService := service.NewAccountService(accountRepo, pool, logger)
+	problemService := service.NewProblemService(pool)
+	poolService := service.NewPoolService(pool, cfg.Account.SweepInterval, logger)
 
 	engine := router.New(router.Deps{
-		Logger: logger,
-		Health: healthHandler,
-		Env:    cfg.App.Env,
+		Logger:     logger,
+		Health:     handler.NewHealthHandler(healthService),
+		Problem:    handler.NewProblemHandler(problemService),
+		Pool:       handler.NewPoolHandler(pool),
+		Account:    handler.NewAccountHandler(accountService),
+		Env:        cfg.App.Env,
+		AdminToken: cfg.Admin.Token,
 	})
 
 	srv := &http.Server{
@@ -97,12 +112,23 @@ func run(addrOverride string) error {
 		IdleTimeout:       120 * time.Second,
 	}
 
+	// 定时扫描号池。用独立 ctx：关闭时先停 HTTP，再停扫描器，最后关数据库，
+	// 否则会出现"数据库已关闭、扫描器还在写"的报错噪音。
+	sweeperCtx, stopSweeper := context.WithCancel(context.Background())
+	var sweeperWG sync.WaitGroup
+	sweeperWG.Add(1)
+	go func() {
+		defer sweeperWG.Done()
+		poolService.RunSweeper(sweeperCtx)
+	}()
+
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("HTTP 服务启动",
 			"addr", cfg.HTTP.Addr,
 			"env", cfg.App.Env,
-			"db_enabled", cfg.DB.Enabled(),
+			"admin_enabled", cfg.Admin.Enabled(),
+			"sweep_interval", cfg.Account.SweepInterval.String(),
 		)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
@@ -111,6 +137,8 @@ func run(addrOverride string) error {
 
 	select {
 	case err := <-errCh:
+		stopSweeper()
+		sweeperWG.Wait()
 		return fmt.Errorf("HTTP 服务异常: %w", err)
 	case <-ctx.Done():
 		logger.Info("收到退出信号，开始关闭")
@@ -118,20 +146,24 @@ func run(addrOverride string) error {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.HTTP.ShutdownTimeout)
 	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
-		return fmt.Errorf("优雅关闭失败: %w", err)
+	shutdownErr := srv.Shutdown(shutdownCtx)
+
+	// 等在途的一轮扫描结束、后台恢复流程收尾，再让 defer 关闭数据库
+	stopSweeper()
+	sweeperWG.Wait()
+	if !pool.WaitBackground(5 * time.Second) {
+		logger.Warn("后台账号恢复任务未在超时内结束，继续关闭")
+	}
+
+	if shutdownErr != nil {
+		return fmt.Errorf("优雅关闭失败: %w", shutdownErr)
 	}
 	logger.Info("已退出")
 	return nil
 }
 
-// initDB 连接 MySQL 并按需执行迁移；未配置 DB_HOST 时返回 nil
+// initDB 连接 MySQL 并按需执行迁移
 func initDB(cfg config.Config, logger *slog.Logger) (*gorm.DB, error) {
-	if !cfg.DB.Enabled() {
-		logger.Warn("未配置 MySQL（DB_HOST 为空），以无数据库模式启动")
-		return nil, nil
-	}
-
 	db, err := repository.NewDB(cfg.DB)
 	if err != nil {
 		return nil, err

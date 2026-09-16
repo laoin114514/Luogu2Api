@@ -15,9 +15,14 @@ import (
 
 // Deps 路由依赖。后续新增 handler 时在这里扩展，由 main 注入。
 type Deps struct {
-	Logger *slog.Logger
-	Health *handler.HealthHandler
-	Env    string // dev / test / prod，用于决定 gin 运行模式
+	Logger  *slog.Logger
+	Health  *handler.HealthHandler
+	Problem *handler.ProblemHandler
+	Pool    *handler.PoolHandler
+	Account *handler.AccountHandler
+	Env     string // dev / test / prod，用于决定 gin 运行模式
+	// AdminToken 为空时不注册管理路由（fail closed），避免无鉴权的号池管理入口
+	AdminToken string
 }
 
 // New 构建 gin 引擎并注册路由
@@ -39,11 +44,25 @@ func New(deps Deps) *gin.Engine {
 	// 健康检查：供探活使用，无需认证
 	r.GET("/healthz", deps.Health.Get)
 
-	// 业务路由待接口设计完成后在此注册，例如：
-	//
-	//	v1 := r.Group("/api/v1")
-	//	v1.GET("/problems/:pid", problemHandler.Get)
-	//	v1.GET("/records/:rid", recordHandler.Get)
+	v1 := r.Group("/api/v1")
+
+	// 号池状态：只读、不含凭据，便于运维查看在线账号数
+	v1.GET("/pool/status", deps.Pool.Status)
+
+	// 业务路由（示例：题目读取，走号池选号 + 失效换号重试）
+	v1.GET("/problems", deps.Problem.Search)
+	v1.GET("/problems/:pid", deps.Problem.Get)
+
+	// 管理路由：号池导入/启停/强制重登，必须携带 X-Admin-Token
+	if deps.AdminToken != "" && deps.Account != nil {
+		admin := v1.Group("/admin", middleware.AdminAuth(deps.AdminToken))
+		admin.GET("/accounts", deps.Account.List)
+		admin.POST("/accounts", deps.Account.Create)
+		admin.GET("/accounts/:id", deps.Account.Get)
+		admin.PATCH("/accounts/:id", deps.Account.Update)
+		admin.DELETE("/accounts/:id", deps.Account.Delete)
+		admin.POST("/accounts/:id/relogin", deps.Account.Relogin)
+	}
 
 	return r
 }

@@ -22,10 +22,3 @@ type Problem struct {
 
 // TableName 指定表名（默认会变成复数 problems，这里显式声明以便阅读）
 func (Problem) TableName() string { return "problems" }
-
-// All 返回需要 AutoMigrate 的全部实体，作为迁移的唯一来源
-func All() []interface{} {
-	return []interface{}{
-		&Problem{},
-	}
-}
