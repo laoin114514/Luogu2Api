@@ -25,6 +25,8 @@ func main() {
     if !client.Auth.IsAuthenticated() {
         client.Auth.RefreshCSRF()
         client.Auth.LoginWithSolver("username", "password", mySolver) // mySolver 需自行实现，SDK 不内置 OCR
+        // 登录响应体不含 uid，自身 UID 从 _uid cookie 读取；OCR 识别会偶发出错，建议失败重试
+        fmt.Println(client.UID())
     }
 
     // 获取题目

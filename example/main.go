@@ -50,8 +50,7 @@ func main() {
 			fmt.Printf("登录失败: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("✓ 登录成功\n")
-		_ = result
+		fmt.Printf("✓ 登录成功 (UID=%d, 账号=%s)\n", client.UID(), result.Username)
 
 		// 登录成功后由调用方自行持久化 cookie
 		if data, err := client.ExportCookies(); err != nil {

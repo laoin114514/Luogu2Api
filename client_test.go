@@ -181,3 +181,36 @@ func TestWithCookiesOptionEmpty(t *testing.T) {
 		t.Errorf("expected no cookies, got %s", data)
 	}
 }
+
+func TestClientUIDFromCookie(t *testing.T) {
+	c, err := NewClient()
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	if uid := c.UID(); uid != 0 {
+		t.Errorf("no session should give UID 0, got %d", uid)
+	}
+
+	if err := c.ImportCookies([]byte(`[{"name":"_uid","value":"1965145","domain":".luogu.com.cn","path":"/"}]`)); err != nil {
+		t.Fatalf("ImportCookies: %v", err)
+	}
+	if uid := c.UID(); uid != 1965145 {
+		t.Errorf("UID = %d, want 1965145", uid)
+	}
+
+	// 非法值不应 panic，返回 0
+	if err := c.ImportCookies([]byte(`[{"name":"_uid","value":"not-a-number","domain":".luogu.com.cn","path":"/"}]`)); err != nil {
+		t.Fatalf("ImportCookies: %v", err)
+	}
+	if uid := c.UID(); uid != 0 {
+		t.Errorf("invalid _uid should give 0, got %d", uid)
+	}
+
+	if err := c.ClearCookies(); err != nil {
+		t.Fatalf("ClearCookies: %v", err)
+	}
+	if uid := c.UID(); uid != 0 {
+		t.Errorf("after clear UID = %d, want 0", uid)
+	}
+}

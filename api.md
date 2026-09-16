@@ -45,6 +45,7 @@ Cookie 仅保存在内存中，SDK 不读写任何文件；是否持久化、存
 func (c *Client) ExportCookies() ([]byte, error)   // 导出为 JSON
 func (c *Client) ImportCookies(data []byte) error  // 从 JSON 恢复
 func (c *Client) ClearCookies() error              // 清空内存中的 cookie
+func (c *Client) UID() int                         // 读取 _uid cookie 得到自身 UID（未登录为 0）
 ```
 
 ```go
@@ -91,7 +92,20 @@ func (a *AuthService) GetCaptcha() ([]byte, error)
 func (a *AuthService) Login(username, password, captcha string) (*LoginResponse, error)
 ```
 
-用户名、密码、验证码登录。成功返回 `LoginResponse{UID, ClientID}`，cookie 保存在内存中（如需持久化请调用 `Client.ExportCookies`）。
+用户名、密码、验证码登录。成功返回 `LoginResponse`（只有 `username`/`locked`/`syncToken`/`redirectTo`），
+cookie 保存在内存中（如需持久化请调用 `Client.ExportCookies`）。
+
+登录失败返回 `*AuthError`，其中 `Type` 是洛谷的异常类名，便于区分原因：
+
+```go
+_, err := client.Auth.Login("user", "pass", captcha)
+var authErr *luogu.AuthError
+if errors.As(err, &authErr) {
+    // authErr.Code    = 400
+    // authErr.Type    = "LuoguWeb\Spilopelia\Exception\CaptchaNotMatchException"
+    // authErr.Message = "图形验证码错误"
+}
+```
 
 ---
 
@@ -113,6 +127,19 @@ client.Auth.LoginWithSolver("user", "pass", func(img []byte) (string, error) {
     return code, nil
 })
 ```
+
+> **建议带重试**：OCR 识别存在错误率，失败时洛谷返回 `Type = CaptchaNotMatchException`。
+> 每次调用都会取一张新验证码，因此直接重试即可：
+>
+> ```go
+> for i := 0; i < 3; i++ {
+>     resp, err := client.Auth.LoginWithSolver(user, pass, myOCR)
+>     if err == nil { break }
+>     var authErr *luogu.AuthError
+>     if errors.As(err, &authErr) && strings.Contains(authErr.Type, "Captcha") { continue }
+>     return err // 其它错误（密码错误、账号锁定等）不重试
+> }
+> ```
 
 ---
 
@@ -305,7 +332,8 @@ detail.Detail.CompileResult.Success  // 编译是否成功
 detail.Detail.CompileResult.Message  // 编译错误信息
 
 for _, subtask := range detail.Detail.JudgeResult.Subtasks {
-    for id, tc := range subtask.TestCases {
+    for _, tc := range subtask.TestCases {
+        tc.ID           // 测试点 ID
         tc.Status       // 测试点状态
         tc.Time         // 耗时
         tc.Memory       // 内存
@@ -513,12 +541,15 @@ type LoginRequest struct {
 
 ```go
 type LoginResponse struct {
-    UID      int    `json:"uid"`
-    ClientID string `json:"client_id"`
+    Username   string `json:"username"`
+    Locked     bool   `json:"locked"`
+    SyncToken  string `json:"syncToken"`
+    RedirectTo string `json:"redirectTo"`
 }
 ```
 
-> 注意：洛谷在 JSON body 中返回 `uid=0`，真正的 session 通过 `Set-Cookie` 头下发。判断登录成功请用 `IsAuthenticated()`。
+> 实测：登录响应体只有这四个字段，**不含 uid/client_id**（旧版文档里的 `UID`/`ClientID` 恒为 0/空，已移除）。
+> 会话通过 `Set-Cookie` 下发；判断登录成功请用 `IsAuthenticated()`，需要自身 UID 请用 `Client.UID()`。
 
 ### Problem
 
@@ -614,6 +645,61 @@ type RecordDetail struct {
 type JudgeDetail struct {
     CompileResult CompileResult `json:"compileResult"`
     JudgeResult   JudgeResult   `json:"judgeResult"`
+}
+
+type CompileResult struct {
+    Success bool   `json:"success"`
+    Message string `json:"message"`
+    Opt2    bool   `json:"opt2"`
+}
+
+type JudgeResult struct {
+    Subtasks          []SubtaskResult `json:"subtasks"`
+    FinishedCaseCount int             `json:"finishedCaseCount"`
+    Status            RecordStatus    `json:"status"`
+    Time              int             `json:"time"`
+    Memory            int             `json:"memory"`
+    Score             int             `json:"score"`
+}
+
+type SubtaskResult struct {
+    ID        int              `json:"id"`
+    Score     int              `json:"score"`
+    Status    RecordStatus     `json:"status"`
+    Time      int              `json:"time"`
+    Memory    int              `json:"memory"`
+    Judger    string           `json:"judger"`
+    TestCases []TestCaseResult `json:"testCases"` // 实测为数组
+}
+
+type TestCaseResult struct {
+    ID          int          `json:"id"`
+    Status      RecordStatus `json:"status"`
+    Time        int          `json:"time"`
+    Memory      int          `json:"memory"`
+    Score       int          `json:"score"`
+    Signal      int          `json:"signal"`
+    ExitCode    int          `json:"exitCode"`
+    Description string       `json:"description"`
+    SubtaskID   int          `json:"subtaskID"`
+}
+```
+
+> ⚠️ 实测（2026-09，账号 littlekaf 的记录）：`judgeResult` 这一层的 `time`/`memory`/`score`/`status` **恒为 0**，
+> 洛谷不再在此层汇总；逐子任务看 `Subtasks`，逐测试点看 `Subtasks[].TestCases`，
+> 总分与整体状态请用 `RecordSummary.Score` / `RecordSummary.Status`。
+
+### ProblemRef
+
+```go
+type ProblemRef struct {
+    PID        string `json:"pid"`
+    Title      string `json:"name"` // 洛谷该字段名为 name，不是 title
+    Difficulty int    `json:"difficulty"`
+    FullScore  int    `json:"fullScore"`
+    Type       string `json:"type"`
+    Submitted  bool   `json:"submitted"`
+    Accepted   bool   `json:"accepted"`
 }
 ```
 
@@ -835,8 +921,9 @@ type ContestDetail struct {
 ```go
 // 登录/认证失败（用户名、密码、验证码错误等）
 type AuthError struct {
-    Code    int
-    Message string
+    Code    int    // HTTP 状态码或洛谷 errorCode
+    Type    string // 洛谷异常类名，如 LuoguWeb\Spilopelia\Exception\CaptchaNotMatchException
+    Message string // 洛谷 errorMessage，如 "图形验证码错误"
 }
 
 // CSRF token 获取失败

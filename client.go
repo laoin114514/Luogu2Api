@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -366,4 +368,24 @@ func (c *Client) ImportCookies(data []byte) error {
 // ClearCookies 清空内存中的 cookie（例如登出后）
 func (c *Client) ClearCookies() error {
 	return c.cookieJar.Clear()
+}
+
+// UID 返回当前会话的用户 UID（读取 _uid cookie），未登录时返回 0
+//
+// 洛谷登录响应体里不含 uid，会话身份只体现在 cookie 中，因此这里是获取自身 UID 的正确方式。
+func (c *Client) UID() int {
+	u, err := url.Parse(c.base())
+	if err != nil {
+		return 0
+	}
+	for _, ck := range c.cookieJar.Cookies(u) {
+		if ck.Name == "_uid" {
+			uid, err := strconv.Atoi(ck.Value)
+			if err != nil {
+				return 0
+			}
+			return uid
+		}
+	}
+	return 0
 }
