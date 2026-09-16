@@ -54,6 +54,8 @@ func TestCheckResponse(t *testing.T) {
 }
 
 // 所有需要登录的接口都应把 401 统一映射为 *UnauthorizedError
+//
+// Record 的两个接口单独在 record_test.go 中覆盖（它们依赖 lentille-context 解析的改动）。
 func TestServicesMapUnauthorizedStatus(t *testing.T) {
 	c := newTestClient(t, serveStatus(t, http.StatusUnauthorized))
 
@@ -64,8 +66,6 @@ func TestServicesMapUnauthorizedStatus(t *testing.T) {
 		"Problem.GetSolutionDetail": func() error { _, err := c.Problem.GetSolutionDetail("abc"); return err },
 		"Problem.GetTranslation":    func() error { _, err := c.Problem.GetTranslation("P1001"); return err },
 		"Problem.GetFull":           func() error { _, _, err := c.Problem.GetFull("P1001"); return err },
-		"Record.GetList":            func() error { _, err := c.Record.GetList(RecordListParams{Page: 1}); return err },
-		"Record.GetDetail":          func() error { _, err := c.Record.GetDetail(1); return err },
 		"Training.GetList":          func() error { _, err := c.Training.GetList(TrainingListParams{Page: 1}); return err },
 		"Training.GetDetail":        func() error { _, err := c.Training.GetDetail(1); return err },
 		"User.Get":                  func() error { _, err := c.User.Get(1); return err },
