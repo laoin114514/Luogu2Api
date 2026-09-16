@@ -261,7 +261,9 @@ go test ./internal/repository/ -v
   把验证间隔调到分钟级。
 - **凭据不能进日志**：日志只记 `account_id/username/status/错误类型`。管理接口返回 DTO，
   永不含 `password`/`cookie`；`ADMIN_TOKEN` 必须设置，否则管理路由不注册（避免裸奔的号池管理入口）。
-- **SDK 无提交能力**：当前 `luoguClient` 只支持读取（题目/记录/题单/讨论/比赛），号池只服务只读接口。
+- **SDK 几乎没有写入能力**：`luoguClient` 目前唯一的写接口是 `User.UpdatePreference`（账号偏好设置，
+  见 SDK 的 `api.md`），题目/记录/题单/讨论/比赛全是只读；号池只服务只读业务接口，
+  `internal/` 这一层**没有**接入偏好设置写入（要接入需要先决定暴露给谁、怎么鉴权）。
 - **已知限制**：SDK 的 `WithContext` 只在构造期生效，业务请求无法按调用方 ctx 取消，只能用
   `LUOGU_TIMEOUT` + `http.Server` 超时兜底。
 - **submodule**：`git clone --recursive`（CI 里 `submodules: true`），否则 `pkg/luoguClient` 为空、
