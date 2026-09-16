@@ -19,7 +19,7 @@ Luogu2Api/
 │   ├── config/config.go         # 环境变量配置与校验（fail fast）
 │   ├── handler/                 # HTTP 层：health / problem / pool / account
 │   ├── middleware/              # 请求 ID、slog 访问日志、管理令牌校验
-│   ├── model/                   # GORM 实体（problem、account）+ 迁移清单 + 哨兵错误
+│   ├── model/                   # GORM 实体（account）+ 迁移清单 + 哨兵错误
 │   ├── repository/              # 唯一使用 GORM 的包（含凭据加解密）
 │   ├── response/                # 统一响应体 {code,message,data} 与业务码
 │   ├── router/route.go          # 路由表

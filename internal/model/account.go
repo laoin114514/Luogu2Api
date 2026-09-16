@@ -1,6 +1,8 @@
 // Package model 定义数据库实体（GORM Model）与表结构映射。
 //
 // 该包只放结构体、表名约定与持久化取值常量，不写任何业务逻辑与查询。
+//
+// 宽度约定：Go 的 int 会被 GORM 映射成 bigint，需要窄类型时显式写 int32/int16。
 package model
 
 import (

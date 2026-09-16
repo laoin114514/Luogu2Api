@@ -5,7 +5,6 @@ package model
 // 新增表时在这里登记一行即可（repository.Migrate 直接消费它）。
 func All() []interface{} {
 	return []interface{}{
-		&Problem{},
 		&Account{},
 	}
 }
