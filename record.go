@@ -1,19 +1,24 @@
 package luoguclient
 
 import (
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
-
-	"github.com/PuerkitoBio/goquery"
 )
 
 // RecordService 记录服务
 type RecordService struct {
 	client *Client
+}
+
+// recordListPayload 记录列表数据
+//
+// 新版（lentille-context）与旧版（_feInjection）的字段结构一致，仅外层包装不同：
+// 新版为 data.records，旧版为 currentData.records。
+type recordListPayload struct {
+	Result  []RecordSummary `json:"result"`
+	Count   int             `json:"count"`
+	PerPage int             `json:"perPage"`
 }
 
 // GetList 获取记录列表
@@ -41,26 +46,32 @@ func (r *RecordService) GetList(params RecordListParams) (*RecordList, error) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("get record list: status %d", resp.StatusCode)
+	if err := checkResponse(resp, "get record list"); err != nil {
+		return nil, err
 	}
 
 	var result struct {
-		CurrentData struct {
-			Records struct {
-				Result  []RecordSummary `json:"result"`
-				Count   int             `json:"count"`
-				PerPage int             `json:"perPage"`
-			} `json:"records"`
-		} `json:"currentData"`
+		Data        recordListWrapper `json:"data"`
+		CurrentData recordListWrapper `json:"currentData"`
 	}
-	if err := parseFeInjection(resp, &result); err != nil {
+	if err := parseLentilleContext(resp, &result); err != nil {
 		return nil, err
 	}
+
+	records := result.Data.Records
+	if len(records.Result) == 0 && records.Count == 0 {
+		// 兼容旧版 _feInjection 的 currentData 包装
+		records = result.CurrentData.Records
+	}
 	return &RecordList{
-		Records: result.CurrentData.Records.Result,
-		Count:   result.CurrentData.Records.Count,
+		Records: records.Result,
+		Count:   records.Count,
 	}, nil
+}
+
+// recordListWrapper 记录列表的包装层
+type recordListWrapper struct {
+	Records recordListPayload `json:"records"`
 }
 
 // GetDetail 获取记录详情（含源代码和评测结果）
@@ -72,64 +83,30 @@ func (r *RecordService) GetDetail(rid int) (*RecordDetail, error) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("get record %d: status %d", rid, resp.StatusCode)
+	if err := checkResponse(resp, "get record %d", rid); err != nil {
+		return nil, err
 	}
 
 	var result struct {
+		Data struct {
+			Record RecordDetail `json:"record"`
+		} `json:"data"`
 		CurrentData struct {
 			Record RecordDetail `json:"record"`
 		} `json:"currentData"`
 	}
-	if err := parseFeInjection(resp, &result); err != nil {
+	if err := parseLentilleContext(resp, &result); err != nil {
 		return nil, err
 	}
-	return &result.CurrentData.Record, nil
-}
 
-// parseFeInjection 从 HTML 页面中提取 window._feInjection 内的 JSON 数据（调用方负责关闭 resp.Body）
-func parseFeInjection(resp *http.Response, v interface{}) error {
-	defer resp.Body.Close()
-
-	doc, err := goquery.NewDocumentFromReader(resp.Body)
-	if err != nil {
-		return fmt.Errorf("parse HTML: %w", err)
+	record := result.Data.Record
+	if record.ID == 0 {
+		// 兼容旧版 _feInjection 的 currentData 包装
+		record = result.CurrentData.Record
 	}
-
-	var encoded string
-	doc.Find("script").Each(func(_ int, s *goquery.Selection) {
-		if encoded != "" {
-			return // 已找到
-		}
-		text := s.Text()
-		idx := strings.Index(text, "_feInjection")
-		if idx < 0 {
-			return
-		}
-		// 提取 decodeURIComponent("...") 中的引号内容
-		after := text[idx:]
-		q1 := strings.Index(after, `"`)
-		if q1 < 0 {
-			return
-		}
-		q2 := strings.Index(after[q1+1:], `"`)
-		if q2 < 0 {
-			return
-		}
-		encoded = after[q1+1 : q1+1+q2]
-	})
-
-	if encoded == "" {
-		return fmt.Errorf("_feInjection not found in page")
+	if record.ID == 0 {
+		// 页面拿到了但没有记录数据：明确报错，避免返回空结构体让调用方误判
+		return nil, fmt.Errorf("get record %d: record data not found in page", rid)
 	}
-
-	decoded, err := url.QueryUnescape(encoded)
-	if err != nil {
-		return fmt.Errorf("decode _feInjection: %w", err)
-	}
-
-	if err := json.Unmarshal([]byte(decoded), v); err != nil {
-		return fmt.Errorf("unmarshal _feInjection: %w", err)
-	}
-	return nil
+	return &record, nil
 }
