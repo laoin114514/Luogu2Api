@@ -140,6 +140,47 @@ func (u *UserService) UpdatePreference(pref UserPreference) (*UserPreference, er
 	return &result.Setting, nil
 }
 
+// JoinOpenSourcePlan 确保当前账号已加入洛谷"代码公开计划"（openSource=1），幂等。
+//
+// 这是 GetPreference + UpdatePreference 的安全组合，用来避免直接调 UpdatePreference
+// 时最常见的误用：偏好更新是**全量替换**语义，只发 {"openSource":1} 会把
+// codeSharingWithAi 重置成平台默认的 true、learningMode 重置成 false。这里先读回
+// 整份偏好、只改 openSource，再整份回写，其它字段原样保留。
+//
+// 返回洛谷记录的加入时间（Unix 秒，未加入时为 0）。全程最多 3 次请求：
+// 读偏好 →（未加入时）写偏好 → 再读一次确认。
+//
+// 注意这是**不可逆动作**：洛谷限制加入后 30 天内不能退出（把 openSource 改回
+// 0/-1 会返回 HTTP 400），因此调用方应当只在明确需要时调用，并按"一生一次"的
+// 幂等语义使用——远端已加入时本方法只读不写。
+func (u *UserService) JoinOpenSourcePlan() (int64, error) {
+	pref, err := u.GetPreference()
+	if err != nil {
+		return 0, err
+	}
+	if pref.OpenSource == OpenSourceEnabled {
+		// 远端已加入（例如人工在网页上开过）：不重复写，直接采用洛谷记录的时间
+		return pref.OpenSourceJoinTime, nil
+	}
+
+	pref.OpenSource = OpenSourceEnabled
+	if _, err := u.UpdatePreference(*pref); err != nil {
+		return 0, err
+	}
+
+	// 更新响应里不含 openSourceJoinTime（它是 setting 的兄弟字段，不在 setting 内），
+	// 而"加入时间 + 30 天"才是真正有意义的解锁基准，值得多这一次读；
+	// 何况"落库后的值"也必须复核——HTTP 200 不代表业务生效。
+	confirmed, err := u.GetPreference()
+	if err != nil {
+		return 0, fmt.Errorf("已提交加入代码公开计划但确认读取失败: %w", err)
+	}
+	if confirmed.OpenSource != OpenSourceEnabled {
+		return 0, fmt.Errorf("加入代码公开计划未生效：openSource=%d", confirmed.OpenSource)
+	}
+	return confirmed.OpenSourceJoinTime, nil
+}
+
 // checkPreferenceResponse 偏好接口的错误归一化。
 //
 // 与 checkResponse 相同的 401/403 → *UnauthorizedError 规则，另外两点：

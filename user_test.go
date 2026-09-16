@@ -3,6 +3,7 @@ package luoguclient
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -213,6 +214,138 @@ func TestUserUpdatePreferenceUnauthorized(t *testing.T) {
 		if unauthorized.StatusCode != status {
 			t.Errorf("StatusCode = %d, want %d", unauthorized.StatusCode, status)
 		}
+	}
+}
+
+// JoinOpenSourcePlan 必须"读-改-写"：只改 openSource，其它偏好原样保留
+// （直接发 {"openSource":1} 会让服务端把省略字段重置成默认值）
+func TestUserJoinOpenSourcePlanReadModifyWrite(t *testing.T) {
+	var posts []map[string]interface{}
+	gets := 0
+	joined := false
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			gets++
+			openSource, joinTime := 0, 0
+			if joined {
+				openSource, joinTime = 1, 1789556739
+			}
+			body := fmt.Sprintf(`{"instance":"main","data":{"openSourceJoinTime":%d,"setting":`+
+				`{"codeFont":null,"colorScheme":null,"openSource":%d,"codeSharingWithAi":false,`+
+				`"learningMode":true,"messageMode":2,"acceptPromotion":true}}}`, joinTime, openSource)
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write([]byte(lentilleHTML(body)))
+			return
+		}
+
+		raw, _ := io.ReadAll(r.Body)
+		var sent map[string]interface{}
+		_ = json.Unmarshal(raw, &sent)
+		posts = append(posts, sent)
+		joined = true
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"setting":` + string(raw) + `}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	joinTime, err := newTestClient(t, srv).User.JoinOpenSourcePlan()
+	if err != nil {
+		t.Fatalf("JoinOpenSourcePlan: %v", err)
+	}
+
+	if joinTime != 1789556739 {
+		t.Errorf("joinTime = %d, want 1789556739（应为洛谷落库后的加入时间）", joinTime)
+	}
+	if len(posts) != 1 {
+		t.Fatalf("应只写一次，实际 %d 次", len(posts))
+	}
+	if gets != 2 {
+		t.Errorf("GET 次数 = %d, want 2（读偏好 + 写后确认）", gets)
+	}
+
+	sent := posts[0]
+	if sent["openSource"] != float64(1) {
+		t.Errorf("openSource = %v, want 1", sent["openSource"])
+	}
+	if len(sent) != 7 {
+		t.Errorf("请求体字段数 = %d, want 7（必须整份回写）: %v", len(sent), sent)
+	}
+	// 这几项是"被省略就会被重置成默认值"的字段：必须原样带回，而不是缺席
+	for key, want := range map[string]interface{}{
+		"codeSharingWithAi": false, // 平台默认是 true
+		"learningMode":      true,  // 平台默认是 false
+		"messageMode":       float64(2),
+		"acceptPromotion":   true,
+		"codeFont":          nil,
+		"colorScheme":       nil,
+	} {
+		got, ok := sent[key]
+		if !ok || got != want {
+			t.Errorf("字段 %s = %v (存在=%v), want %v", key, got, ok, want)
+		}
+	}
+}
+
+// 远端已是 1 时只读不写：不产生任何写请求
+func TestUserJoinOpenSourcePlanAlreadyJoined(t *testing.T) {
+	gets, posts := 0, 0
+
+	body := `{"instance":"main","data":{"openSourceJoinTime":1789556739,"setting":` +
+		`{"codeFont":null,"colorScheme":null,"openSource":1,"codeSharingWithAi":false,` +
+		`"learningMode":true,"messageMode":2,"acceptPromotion":true}}}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			gets++
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write([]byte(lentilleHTML(body)))
+			return
+		}
+		posts++
+	}))
+	t.Cleanup(srv.Close)
+
+	joinTime, err := newTestClient(t, srv).User.JoinOpenSourcePlan()
+	if err != nil {
+		t.Fatalf("JoinOpenSourcePlan: %v", err)
+	}
+	if joinTime != 1789556739 {
+		t.Errorf("joinTime = %d, want 1789556739", joinTime)
+	}
+	if posts != 0 {
+		t.Errorf("已加入时不应写，实际写了 %d 次", posts)
+	}
+	if gets != 1 {
+		t.Errorf("GET 次数 = %d, want 1", gets)
+	}
+}
+
+// 写入后复核发现没生效：必须报错，不能只看 HTTP 200
+func TestUserJoinOpenSourcePlanWriteNotEffective(t *testing.T) {
+	body := `{"instance":"main","data":{"openSourceJoinTime":0,"setting":` +
+		`{"codeFont":null,"colorScheme":null,"openSource":0,"codeSharingWithAi":true,` +
+		`"learningMode":false,"messageMode":2,"acceptPromotion":true}}}`
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			_, _ = w.Write([]byte(lentilleHTML(body)))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"setting":{"codeFont":null,"colorScheme":null,"openSource":0,` +
+			`"codeSharingWithAi":true,"learningMode":false,"messageMode":2,"acceptPromotion":true}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := newTestClient(t, srv).User.JoinOpenSourcePlan()
+	if err == nil {
+		t.Fatal("写入未生效时应返回错误")
+	}
+	if !strings.Contains(err.Error(), "未生效") {
+		t.Errorf("error = %v, want 含 '未生效'", err)
 	}
 }
 

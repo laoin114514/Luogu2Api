@@ -2,8 +2,8 @@
 
 洛谷 (luogu.com.cn) 平台的 Go Client，覆盖认证、题目、记录、题单等核心功能。
 
-写入能力目前只有一个：账号偏好设置（`User.GetPreference` / `User.UpdatePreference`），
-其余接口均为只读。
+写入能力只有账号偏好设置：`User.GetPreference` / `User.UpdatePreference`
+以及建立在它们之上的 `User.JoinOpenSourcePlan`（幂等加入"代码公开计划"），其余接口均为只读。
 
 ## 安装
 
@@ -57,6 +57,11 @@ func main() {
     pref.AcceptPromotion = false
     updated, _ := client.User.UpdatePreference(*pref)
     fmt.Println(updated.LearningMode, updated.OpenSource)
+
+    // 加入"代码公开计划"：幂等（读-改-写，不误伤其它偏好）。
+    // ⚠️ 不可逆：加入后 30 天内不能退出，只在明确需要时调用。
+    joinTime, _ := client.User.JoinOpenSourcePlan()
+    fmt.Println(joinTime) // Unix 秒；+30 天即解锁时间
 }
 ```
 

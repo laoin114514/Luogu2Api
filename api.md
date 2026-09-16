@@ -504,6 +504,39 @@ if errors.As(err, &apiErr) {
 
 ---
 
+### JoinOpenSourcePlan
+
+```go
+func (u *UserService) JoinOpenSourcePlan() (joinTime int64, err error)
+```
+
+确保当前账号已加入洛谷"代码公开计划"（`openSource=1`），**幂等**（需要已登录）。
+
+- 远端已经是 `1`：只读一次偏好就返回，**不写**
+- 否则：`GetPreference` → 只改 `openSource` → `UpdatePreference` 整份回写 → 再读一次确认
+- 返回洛谷记录的加入时间（Unix 秒）
+
+最多 3 次请求，且不会误伤其它偏好——偏好更新是**全量替换**语义，只发
+`{"openSource":1}` 会把 `codeSharingWithAi` 重置成默认 `true`、`learningMode` 重置成 `false`，
+本方法用"读-改-写"规避了这一点：
+
+```go
+joinTime, err := client.User.JoinOpenSourcePlan()
+if err != nil {
+    // 失败即可稍后重试：远端未加入时什么都没变
+    return err
+}
+log.Println("已加入，30 天内不能退出，解锁基准:", time.Unix(joinTime, 0))
+```
+
+⚠️ **不可逆**：加入后洛谷限制 30 天内不能退出（把 `openSource` 改回 `0`/`-1` 返回 HTTP 400）。
+调用方应当按"一生一次"使用——成功之后不要再调（或依赖本方法的幂等：再调只是多一次读）。
+
+写入后用 `GetPreference` 复核而不是只看 HTTP 200：该接口的更新响应里不含
+`openSourceJoinTime`，而且"落库后的值"才是事实。落库结果不是 `1` 时返回错误。
+
+---
+
 ## DiscussService 讨论
 
 ### GetList
