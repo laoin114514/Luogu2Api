@@ -11,7 +11,6 @@ import (
 	gormlogger "gorm.io/gorm/logger"
 
 	"github.com/laoin114514/luogu2api/internal/config"
-	"github.com/laoin114514/luogu2api/internal/model"
 )
 
 // NewDB 建立 MySQL 连接并配置连接池
@@ -34,14 +33,6 @@ func NewDB(cfg config.DB) (*gorm.DB, error) {
 	sqlDB.SetConnMaxLifetime(cfg.ConnMaxLifetime)
 
 	return db, nil
-}
-
-// Migrate 执行 AutoMigrate。建议只在开发环境或首次部署时开启（DB_AUTO_MIGRATE=true）。
-func Migrate(db *gorm.DB) error {
-	if err := db.AutoMigrate(model.All()...); err != nil {
-		return fmt.Errorf("AutoMigrate 失败: %w", err)
-	}
-	return nil
 }
 
 // Close 关闭连接池

@@ -19,10 +19,11 @@ Luogu2Api/
 │   ├── config/config.go         # 环境变量配置与校验（fail fast）
 │   ├── handler/                 # HTTP 层：health / problem / pool / account
 │   ├── middleware/              # 请求 ID、slog 访问日志、管理令牌校验
-│   ├── model/                   # GORM 实体（account）+ 迁移清单 + 哨兵错误
+│   ├── model/                   # GORM 实体（account、schema_migrations）+ 实体清单 + 哨兵错误
 │   ├── repository/              # 唯一使用 GORM 的包（含凭据加解密）
 │   ├── response/                # 统一响应体 {code,message,data} 与业务码
 │   ├── router/route.go          # 路由表
+│   ├── schema/                  # 库结构版本管理：模型↔库差异、安全变更自动执行、审计
 │   ├── secret/cipher.go         # AES-GCM 加解密（密码/cookie 落库前加密）
 │   └── service/                 # 业务层：health / pool 扫描器 / problem / account
 ├── configs/env.example          # 环境变量样例
@@ -46,7 +47,8 @@ cmd/api ──► router ──► handler ──► service ──► repositor
 | `service` | 业务编排、上游错误翻译成业务语义 | 只依赖自己声明的窄接口，不依赖 gin/GORM/SDK |
 | `repository` | 数据访问 | **唯一**直接使用 GORM/MySQL 的包 |
 | `client` | 外部服务访问 + 号池 | **唯一**直接使用洛谷 SDK 的包 |
-| `model` | 表结构、状态常量、跨层哨兵错误 | 只放结构体与表名；`model.All()` 是迁移唯一来源 |
+| `model` | 表结构、状态常量、跨层哨兵错误 | 只放结构体与表名；`model.All()` 是库结构的唯一来源 |
+| `schema` | 库结构校验与迁移 | 结构只由模型推导，不写迁移 SQL；破坏性变更只报告不执行 |
 | `secret` | 凭据加解密 | 无业务依赖，可独立测试 |
 
 ## 号池工作原理
@@ -162,6 +164,41 @@ cmd/api ──► router ──► handler ──► service ──► repositor
   `(enabled AND status IN (...) AND next_verify_at IS NULL) OR next_verify_at <= ?`，
   后半段不带任何过滤，会把未到期甚至已停用/封禁的账号一起捞出来。
 
+## 数据库结构与迁移
+
+**结构的唯一来源是 `model` 包里的 GORM 模型：项目里没有任何手写的迁移 SQL 文件，也没有需要
+手工维护的版本号。** 每次启动（以及 `-migrate` / `-schema-status`）都做同一件事：由模型 +
+当前 dialector 推导出"期望形态"，从 `information_schema` 读回"实际形态"，两者相减。
+
+差异分两类，处置方式刻意不同：
+
+| 差异 | 例子 | 处置 |
+|---|---|---|
+| **安全**（不会丢数据） | 表不存在、缺列、缺索引 | 开了 `DB_MIGRATE_ON_START` 或执行 `api -migrate` 时自动执行 |
+| **需人工确认** | 库里多出来的列/索引、列的类型/可空性/默认值/自增不一致 | 只报告 + 给出可直接复制的 `ALTER TABLE`，**永不自动执行** |
+
+后者不自动执行的原因：可能是收窄（`varchar(64)` → `varchar(32)` 会截断数据）、可能是别人
+手工加的列、也可能是早期版本留下的痕迹。默认 `DB_SCHEMA_STRICT=true` 会让服务在存在这类
+差异时**拒绝启动**——把问题挡在启动阶段（和配置 fail-fast 一个道理），而不是留到某个业务
+请求上变成 `Unknown column`；确认可以忽略时设 `DB_SCHEMA_STRICT=false`。
+
+三个入口：
+
+```bash
+go run ./cmd/api                 # 启动服务：校验 +（可选）自动补齐；结构落后就报错退出
+go run ./cmd/api -migrate        # 只做结构变更后退出（部署流程用；仍有需人工确认的差异则退出码非 0）
+go run ./cmd/api -schema-status  # 只打印差异（只读：不改结构、不写审计），不一致时退出码非 0
+```
+
+因为是"模型 vs 库现状"的现场比对，**手工执行的 DDL 不需要在代码里登记**——改完自然一致。
+每次真正执行了变更、或发现了需人工处理的差异，就往 `schema_migrations` 追加一行审计
+（模型指纹 + 库指纹 + 本次摘要），用来回溯"这个库经历过什么"；只读检查不写任何东西。
+变更期间用 MySQL 命名锁（`GET_LOCK`）串行化，多实例同时启动不会两边同时 ALTER。
+
+与 GORM `AutoMigrate` 的区别（也就是它被换掉的原因）：AutoMigrate 会**静默地**比对并
+`ALTER`（作者踩过一次：手工 DDL 带了 `DEFAULT`，于是每次启动都想再 ALTER 一次），不删列、
+不记录、也不告诉你它改了什么；`internal/schema` 只做安全子集，其余停下来要人确认，并且留痕。
+
 ## 环境变量
 
 **配置只来自环境变量**（`config.Load()` 是纯函数，只读 `os.Getenv`）。二进制刻意
@@ -195,7 +232,8 @@ cmd/api ──► router ──► handler ──► service ──► repositor
 |---|---|---|
 | `APP_ENV` | `dev` | `prod` 时 gin 走 release、日志输出 JSON |
 | `HTTP_ADDR` | `:8080` | 监听地址 |
-| `DB_AUTO_MIGRATE` | `false` | 建表用，建议仅开发环境开启 |
+| `DB_MIGRATE_ON_START` | `false` | 启动时自动补齐库结构（建表/加列/建索引）；关闭时只校验，落后即启动失败 |
+| `DB_SCHEMA_STRICT` | `true` | 发现需人工确认的结构差异（删列/改类型）时拒绝启动 |
 | `LUOGU_TIMEOUT` / `LUOGU_RETRY` | `30s` / `1` | SDK 超时与内部重试次数 |
 | `ACCOUNT_SWEEP_INTERVAL` | `5m` | 扫描器 tick |
 | `ACCOUNT_VERIFY_INTERVAL` | `30m` | 单账号验证间隔（带抖动） |
@@ -237,7 +275,7 @@ python3 scripts/ocr_stub.py
 # 3) 配置：复制样例后编辑 configs/.env（已在 .gitignore 里）
 Copy-Item configs/env.example configs/.env
 # 编辑 configs/.env：至少填 ACCOUNT_SECRET_KEY（openssl rand -base64 32）
-# 与 LUOGU_OCR_URL；本地可用 DB_AUTO_MIGRATE=true 让它自动建表
+# 与 LUOGU_OCR_URL；本地可用 DB_MIGRATE_ON_START=true 让它自动建表
 
 # 4) 启动（把 .env 导出到当前会话，退出即失效；不会污染系统环境变量）
 pwsh scripts/dev.ps1
@@ -250,7 +288,7 @@ powershell -ExecutionPolicy Bypass -File scripts/dev.ps1
 
 ```powershell
 $env:DB_HOST="127.0.0.1"; $env:DB_USER="root"; $env:DB_PASSWORD=""; $env:DB_NAME="luogu2api"
-$env:DB_AUTO_MIGRATE="true"
+$env:DB_MIGRATE_ON_START="true"
 $env:ACCOUNT_SECRET_KEY=(openssl rand -base64 32)
 $env:LUOGU_OCR_URL="http://127.0.0.1:9898/ocr"
 $env:ADMIN_TOKEN="dev-token"
@@ -306,12 +344,15 @@ go build ./... && go vet ./... && go test -race ./...
 (cd pkg/luoguClient && go test -race ./...)     # 嵌套 module，./... 覆盖不到
 ```
 
-仓储层集成测试需要真实 MySQL（未设置则自动跳过）：
+结构检查与仓储层的集成测试需要真实 MySQL（未设置 `TEST_DB_DSN` 则自动跳过）：
 
 ```powershell
 $env:TEST_DB_DSN="root:@tcp(127.0.0.1:3306)/luogu2api_test?charset=utf8mb4&parseTime=True&loc=Local"
-go test ./internal/repository/ -v
+go test ./internal/schema/ ./internal/repository/ -v
 ```
+
+`schema` 的集成测试会真的建表、加列，再故意制造『有人手工改过库』的差异，断言只报告不执行。
+类型归一化（`bool` ↔ `tinyint(1)`、整数显示宽度、可空时间列、COMMENT）写错的话，那里会立刻红。
 
 ## 部署注意
 
@@ -331,15 +372,12 @@ go test ./internal/repository/ -v
   `JoinOpenSourcePlan`，见 SDK 的 `api.md`），题目/记录/题单/讨论/比赛全是只读。
   号池只在 `ACCOUNT_JOIN_OPEN_SOURCE=true` 时用它补做"加入代码公开计划"（幂等、失败不影响可用性），
   没有对外暴露写接口——要暴露得先决定给谁用、怎么鉴权。
-- **新增列要手动迁移**：`open_source_joined` / `open_source_joined_at` 只在
-  `DB_AUTO_MIGRATE=true` 时自动加；生产请先执行（与 AutoMigrate 生成的定义一致，
-  刻意不写 `DEFAULT`：模型里也不写 `default` 标签，见上面那个 GORM 的坑）
-  ```sql
-  ALTER TABLE accounts
-    ADD COLUMN open_source_joined TINYINT(1) NOT NULL,
-    ADD COLUMN open_source_joined_at DATETIME(3) NULL;
-  ```
-  再滚动升级（老版本先跑也不受影响：旧代码不认识这两列，新代码缺列才会报错）。
+- **改模型即改结构**：加表/加列/加索引由 `api -migrate`（或其中一个实例开
+  `DB_MIGRATE_ON_START=true`）自动执行，**不需要写迁移 SQL**；删列、改类型这类有丢数据
+  风险的变更不会被自动执行——服务会打印可直接复制的 SQL 并拒绝启动（`DB_SCHEMA_STRICT`），
+  人工确认后执行即可。审计记录在 `schema_migrations`。
+- **部署顺序**：先跑 `api -migrate`（或让一个实例开自动迁移），再滚动升级应用；老版本先跑
+  也安全——加列对旧代码是透明的。
 - **已知限制**：SDK 的 `WithContext` 只在构造期生效，业务请求无法按调用方 ctx 取消，只能用
   `LUOGU_TIMEOUT` + `http.Server` 超时兜底。
 - **submodule**：`git clone --recursive`（CI 里 `submodules: true`），否则 `pkg/luoguClient` 为空、

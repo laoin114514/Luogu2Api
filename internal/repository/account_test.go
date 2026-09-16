@@ -14,6 +14,7 @@ import (
 	gormlogger "gorm.io/gorm/logger"
 
 	"github.com/laoin114514/luogu2api/internal/model"
+	"github.com/laoin114514/luogu2api/internal/schema"
 	"github.com/laoin114514/luogu2api/internal/secret"
 )
 
@@ -38,8 +39,9 @@ func integrationDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("连接测试数据库失败: %v", err)
 	}
-	if err := db.AutoMigrate(&model.Account{}); err != nil {
-		t.Fatalf("迁移 accounts 表失败: %v", err)
+	// 与生产走同一条建表路径（internal/schema），集成测试顺带覆盖迁移机制本身
+	if _, err := schema.Ensure(context.Background(), db, schema.Options{Apply: true}, model.All()...); err != nil {
+		t.Fatalf("初始化表结构失败: %v", err)
 	}
 	return db
 }

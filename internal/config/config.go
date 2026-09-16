@@ -27,9 +27,15 @@ const (
 	defaultDBMaxIdleConns  = 10
 	defaultDBConnLifetime  = time.Hour
 	defaultDBLogLevel      = "warn"
-	defaultLuoguTimeout    = 30 * time.Second
-	defaultLuoguRetry      = 1
-	defaultLogLevel        = "info"
+	// 启动时自动补齐库结构（建表/加列/建索引）默认关闭：改结构是有后果的动作，
+	// 该由部署步骤显式决定；默认只校验，发现落后就让启动失败。
+	defaultDBMigrateOnStart = false
+	// 发现需要人工确认的差异（删列/改类型）时是否拒绝启动。默认 true：
+	// 库结构与模型不一致时不该带病运行。
+	defaultDBSchemaStrict = true
+	defaultLuoguTimeout   = 30 * time.Second
+	defaultLuoguRetry     = 1
+	defaultLogLevel       = "info"
 
 	// 号池
 	defaultAccountSweepInterval   = 5 * time.Minute
@@ -96,8 +102,13 @@ type DB struct {
 	MaxOpenConns    int
 	MaxIdleConns    int
 	ConnMaxLifetime time.Duration
-	AutoMigrate     bool
-	LogLevel        string // silent / error / warn / info
+	// MigrateOnStart 启动时自动执行安全的库结构变更（建表/加列/建索引）。
+	// 关闭时只做校验：库结构落后于代码会让启动直接失败（见 internal/schema）。
+	MigrateOnStart bool
+	// SchemaStrict 发现『需要人工确认』的结构差异时拒绝启动（删列、改类型、
+	// 索引变化等自动执行有丢数据风险的操作）。
+	SchemaStrict bool
+	LogLevel     string // silent / error / warn / info
 }
 
 // Enabled 是否启用 MySQL
@@ -176,7 +187,8 @@ func Load() (Config, error) {
 			MaxOpenConns:    envInt("DB_MAX_OPEN_CONNS", defaultDBMaxOpenConns),
 			MaxIdleConns:    envInt("DB_MAX_IDLE_CONNS", defaultDBMaxIdleConns),
 			ConnMaxLifetime: envDuration("DB_CONN_MAX_LIFETIME", defaultDBConnLifetime),
-			AutoMigrate:     envBool("DB_AUTO_MIGRATE", false),
+			MigrateOnStart:  envBool("DB_MIGRATE_ON_START", defaultDBMigrateOnStart),
+			SchemaStrict:    envBool("DB_SCHEMA_STRICT", defaultDBSchemaStrict),
 			LogLevel:        env("DB_LOG_LEVEL", defaultDBLogLevel),
 		},
 		Luogu: Luogu{

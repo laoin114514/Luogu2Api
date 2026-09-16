@@ -106,7 +106,8 @@ func TestLoadFromEnv(t *testing.T) {
 	t.Setenv("HTTP_ADDR", "127.0.0.1:9000")
 	t.Setenv("HTTP_SHUTDOWN_TIMEOUT", "3s")
 	t.Setenv("DB_PASSWORD", "secret")
-	t.Setenv("DB_AUTO_MIGRATE", "true")
+	t.Setenv("DB_MIGRATE_ON_START", "true")
+	t.Setenv("DB_SCHEMA_STRICT", "false")
 	t.Setenv("DB_MAX_OPEN_CONNS", "100")
 	t.Setenv("DB_MAX_IDLE_CONNS", "20")
 	t.Setenv("ACCOUNT_SWEEP_INTERVAL", "1m")
@@ -129,8 +130,9 @@ func TestLoadFromEnv(t *testing.T) {
 	if cfg.HTTP.Addr != "127.0.0.1:9000" || cfg.HTTP.ShutdownTimeout != 3*time.Second {
 		t.Errorf("HTTP = %+v", cfg.HTTP)
 	}
-	if !cfg.DB.Enabled() || !cfg.DB.AutoMigrate {
-		t.Errorf("DB.Enabled/AutoMigrate = %v/%v", cfg.DB.Enabled(), cfg.DB.AutoMigrate)
+	if !cfg.DB.Enabled() || !cfg.DB.MigrateOnStart || cfg.DB.SchemaStrict {
+		t.Errorf("DB.Enabled/MigrateOnStart/SchemaStrict = %v/%v/%v",
+			cfg.DB.Enabled(), cfg.DB.MigrateOnStart, cfg.DB.SchemaStrict)
 	}
 	if cfg.DB.MaxOpenConns != 100 || cfg.DB.MaxIdleConns != 20 {
 		t.Errorf("连接池 = %d/%d", cfg.DB.MaxOpenConns, cfg.DB.MaxIdleConns)
