@@ -1,4 +1,4 @@
-# 一次跑通两个 module 的构建与测试。
+﻿# 一次跑通两个 module 的构建与测试。
 #
 # 为什么需要它：pkg/luoguClient 是嵌套 module，`go build ./...` / `go test ./...`
 # 不会进入其中，所以 SDK 必须单独跑一遍。

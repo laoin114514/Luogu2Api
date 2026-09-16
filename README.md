@@ -107,6 +107,8 @@ curl -s http://127.0.0.1:8080/healthz
 
 ```powershell
 pwsh scripts/check.ps1
+# Windows PowerShell 5.1 亦可（脚本带 UTF-8 BOM）：
+powershell -ExecutionPolicy Bypass -File scripts/check.ps1
 ```
 
 等价手动命令：
