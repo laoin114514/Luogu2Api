@@ -54,12 +54,18 @@ type ClientFactory func(cookie []byte) (SessionClient, error)
 //
 // ctx 是进程级上下文：SDK 的 WithContext 只在构造期生效，构造完成后无法按
 // 单次请求取消，因此业务侧只能用 HTTP 超时兜底（见 README 的已知限制）。
-func newSDKFactory(ctx context.Context, cfg config.Luogu) ClientFactory {
+//
+// newUA 在每次建会话时取一条 UA：SDK 的 User-Agent 在构造期写死、之后改不了，
+// 而池子的约定是"一个账号一个长期存活的 client"，于是"一号一会话"天然就是
+// "一会话一条 UA"——同一账号的所有请求共用一条 UA，中途不会换指纹。
+// UA 由内嵌数据生成，构造期不发起任何网络请求。
+func newSDKFactory(ctx context.Context, cfg config.Luogu, newUA func() string) ClientFactory {
 	return func(cookie []byte) (SessionClient, error) {
 		c, err := sdk.NewClient(
 			sdk.WithContext(ctx),
 			sdk.WithTimeout(cfg.Timeout),
 			sdk.WithRetry(cfg.Retry, nil),
+			sdk.WithUserAgent(newUA()),
 			sdk.WithCookies(cookie),
 		)
 		if err != nil {

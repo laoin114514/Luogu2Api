@@ -16,6 +16,7 @@ import (
 
 	"github.com/laoin114514/luogu2api/internal/config"
 	"github.com/laoin114514/luogu2api/internal/model"
+	"github.com/laoin114514/luogu2api/pkg/fakeuseragent"
 )
 
 // 号池对外的哨兵错误
@@ -187,14 +188,16 @@ func WithClock(now func() time.Time) PoolOption {
 	return func(p *Pool) { p.now = now }
 }
 
-// NewPool 创建号池（尚未加载账号，需调用 Warmup）
+// NewPool 创建号池（尚未加载账号，需调用 Warmup）。
+//
+// 每个账号的会话在建立时各自取一条随机 UA（见 newSDKFactory 的 newUA 参数）。
 func NewPool(ctx context.Context, cfg config.Config, store AccountStore, log logger, opts ...PoolOption) *Pool {
 	p := &Pool{
 		cfg:      cfg,
 		store:    store,
 		logger:   log,
 		now:      time.Now,
-		factory:  newSDKFactory(ctx, cfg.Luogu),
+		factory:  newSDKFactory(ctx, cfg.Luogu, fakeuseragent.Random),
 		solver:   NewOCRClient(cfg.OCR),
 		sessions: make(map[uint]*session),
 	}
