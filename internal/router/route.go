@@ -5,6 +5,7 @@ package router
 
 import (
 	"log/slog"
+	"net/http"
 
 	"github.com/gin-gonic/gin"
 
@@ -21,6 +22,9 @@ type Deps struct {
 	Pool    *handler.PoolHandler
 	Account *handler.AccountHandler
 	Env     string // dev / test / prod，用于决定 gin 运行模式
+	// DashboardDir 是 Pool-Dashboard 的 Vite 构建目录。为空时不注册静态站点，
+	// 便于 HTTP 路由单测以及只运行 API 的场景。
+	DashboardDir string
 	// AdminToken 为空时不注册管理路由（fail closed），避免无鉴权的号池管理入口
 	AdminToken string
 }
@@ -62,6 +66,15 @@ func New(deps Deps) *gin.Engine {
 		admin.PATCH("/accounts/:id", deps.Account.Update)
 		admin.DELETE("/accounts/:id", deps.Account.Delete)
 		admin.POST("/accounts/:id/relogin", deps.Account.Relogin)
+	}
+
+	// 管理站点单独挂在 /dashboard/，不占用 API 根路径。Vite 的 base 也固定为
+	// 该前缀，所以构建后的 JS/CSS 均由同一 Gin 进程按同源方式提供。
+	if deps.DashboardDir != "" {
+		r.GET("/dashboard", func(c *gin.Context) {
+			c.Redirect(http.StatusMovedPermanently, "/dashboard/")
+		})
+		r.StaticFS("/dashboard", http.Dir(deps.DashboardDir))
 	}
 
 	return r
