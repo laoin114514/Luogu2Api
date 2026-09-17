@@ -125,12 +125,14 @@ func run(addrOverride string, migrateOnly, schemaStatus bool) error {
 	healthService := service.NewHealthService(repository.NewHealthRepository(db), pool)
 	accountService := service.NewAccountService(accountRepo, pool, logger)
 	problemService := service.NewProblemService(pool)
+	recordService := service.NewRecordService(pool)
 	poolService := service.NewPoolService(pool, cfg.Account.SweepInterval, logger)
 
 	engine := router.New(router.Deps{
 		Logger:     logger,
 		Health:     handler.NewHealthHandler(healthService),
 		Problem:    handler.NewProblemHandler(problemService),
+		Record:     handler.NewRecordHandler(recordService),
 		Pool:       handler.NewPoolHandler(pool),
 		Account:    handler.NewAccountHandler(accountService),
 		Env:        cfg.App.Env,

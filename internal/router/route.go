@@ -18,6 +18,7 @@ type Deps struct {
 	Logger  *slog.Logger
 	Health  *handler.HealthHandler
 	Problem *handler.ProblemHandler
+	Record  *handler.RecordHandler
 	Pool    *handler.PoolHandler
 	Account *handler.AccountHandler
 	Env     string // dev / test / prod，用于决定 gin 运行模式
@@ -52,6 +53,9 @@ func New(deps Deps) *gin.Engine {
 	// 业务路由（示例：题目读取，走号池选号 + 失效换号重试）
 	v1.GET("/problems", deps.Problem.Search)
 	v1.GET("/problems/:pid", deps.Problem.Get)
+
+	// 用户提交记录：按洛谷 UID 查询，可选按题目 / 状态过滤
+	v1.GET("/users/:uid/records", deps.Record.ListByUser)
 
 	// 管理路由：号池导入/启停/强制重登，必须携带 X-Admin-Token
 	if deps.AdminToken != "" && deps.Account != nil {

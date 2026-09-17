@@ -32,6 +32,12 @@ func (stubProblem) Search(context.Context, string, int, int) (*client.SearchResu
 	return &client.SearchResult{Total: 0, Page: 1}, nil
 }
 
+type stubRecord struct{}
+
+func (stubRecord) ListByUser(context.Context, int, string, int, int) (*service.RecordListDTO, error) {
+	return &service.RecordListDTO{UID: 42, Page: 1, Count: 1}, nil
+}
+
 type stubPool struct{}
 
 func (stubPool) Stats() client.Stats { return client.Stats{Total: 1, Online: 1} }
@@ -64,6 +70,7 @@ func newEngine(adminToken string) *gin.Engine {
 			Luogu:  service.LuoguStatus{Status: service.StatusAuthenticated, Total: 1, Online: 1},
 		}}),
 		Problem:    handler.NewProblemHandler(stubProblem{}),
+		Record:     handler.NewRecordHandler(stubRecord{}),
 		Pool:       handler.NewPoolHandler(stubPool{}),
 		Account:    handler.NewAccountHandler(stubAccounts{}),
 		Env:        "test",
@@ -104,6 +111,8 @@ func TestRoutesAreRegistered(t *testing.T) {
 		{http.MethodGet, "/api/v1/pool/status", http.StatusOK},
 		{http.MethodGet, "/api/v1/problems/P1001", http.StatusOK},
 		{http.MethodGet, "/api/v1/problems?keyword=排序", http.StatusOK},
+		{http.MethodGet, "/api/v1/users/42/records", http.StatusOK},
+		{http.MethodGet, "/api/v1/users/42/records?pid=P1001&status=12&page=2", http.StatusOK},
 	}
 
 	for _, tt := range tests {

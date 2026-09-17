@@ -15,9 +15,10 @@ Luogu2Api/
 │   │   ├── session.go           #   SessionClient 窄接口 + SDK 适配
 │   │   ├── pool.go              #   号池：选号、验证、重登、错误分类、状态落库
 │   │   ├── captcha.go           #   外挂 OCR 服务的 CaptchaSolver 适配
-│   │   └── problem.go           #   业务适配方法（类型别名 + GetProblem/Search）
+│   │   ├── problem.go           #   业务适配方法（类型别名 + GetProblem/Search）
+│   │   └── record.go            #   业务适配方法（类型别名 + ListRecords）
 │   ├── config/config.go         # 环境变量配置与校验（fail fast）
-│   ├── handler/                 # HTTP 层：health / problem / pool / account
+│   ├── handler/                 # HTTP 层：health / problem / record / pool / account
 │   ├── middleware/              # 请求 ID、slog 访问日志、管理令牌校验
 │   ├── model/                   # GORM 实体（account、schema_migrations）+ 实体清单 + 哨兵错误
 │   ├── repository/              # 唯一使用 GORM 的包（含凭据加解密）
@@ -25,7 +26,7 @@ Luogu2Api/
 │   ├── router/route.go          # 路由表
 │   ├── schema/                  # 库结构版本管理：模型↔库差异、安全变更自动执行、审计
 │   ├── secret/cipher.go         # AES-GCM 加解密（密码/cookie 落库前加密）
-│   └── service/                 # 业务层：health / pool 扫描器 / problem / account
+│   └── service/                 # 业务层：health / pool 扫描器 / problem / record / account
 ├── configs/env.example          # 环境变量样例
 ├── scripts/check.ps1            # 一次跑通两个 module 的 build/vet/test
 ├── scripts/ocr_stub.py          # 本地联调用的假 OCR 服务
@@ -253,6 +254,7 @@ ACCOUNT_SWEEP_INTERVAL`、抖动越界、密钥长度/编码非法、OCR 地址�
 | GET | `/api/v1/pool/status` | 号池快照（在线/待重登/失败/停用/封禁数、最近一轮扫描统计） |
 | GET | `/api/v1/problems/:pid` | 题目详情（走号池选号 + 失效换号重试） |
 | GET | `/api/v1/problems?keyword=&page=&pageSize=` | 题目搜索 |
+| GET | `/api/v1/users/:uid/records?pid=&status=&page=` | 指定洛谷用户的提交记录（走号池选号；`pid`/`status` 可选过滤） |
 | GET | `/api/v1/admin/accounts` | 账号列表（**需 `X-Admin-Token`**） |
 | POST | `/api/v1/admin/accounts` | 新增账号并尝试首次登录 |
 | GET | `/api/v1/admin/accounts/:id` | 账号详情 |
@@ -305,6 +307,7 @@ curl -s -X POST http://127.0.0.1:8080/api/v1/admin/accounts \
 curl -s http://127.0.0.1:8080/healthz
 curl -s http://127.0.0.1:8080/api/v1/pool/status
 curl -s http://127.0.0.1:8080/api/v1/problems/P1001
+curl -s "http://127.0.0.1:8080/api/v1/users/1582049/records?page=1"
 ```
 
 健康检查响应：
@@ -328,6 +331,54 @@ curl -s http://127.0.0.1:8080/api/v1/problems/P1001
   }
 }
 ```
+
+提交记录响应（分页字段由服务端算好，调用方不必自己数）：
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": {
+    "uid": 1582049,
+    "page": 1,
+    "pageSize": 20,
+    "totalPages": 9,
+    "count": 178,
+    "pageRecordCount": 20,
+    "records": [
+      {
+        "id": 240247732,
+        "status": 12,
+        "score": 100,
+        "time": 15,
+        "memory": 1024,
+        "sourceCodeLength": 42,
+        "submitTime": 1750000000,
+        "language": 14,
+        "enableO2": true,
+        "problem": { "pid": "P1001", "name": "A+B Problem", "difficulty": 1, "submitted": true, "accepted": true },
+        "user": { "uid": 1582049, "name": "tester" }
+      }
+    ]
+  }
+}
+```
+
+`status` 是洛谷的评测状态码（`12` 通过、`14` 未通过/部分分、`2` 评测中；省略或 `0` 表示不按状态
+过滤），`pid` 省略表示不按题目过滤。记录接口需要登录态：未登录时洛谷返回 401，号池会换号重试，
+没有可用账号返回 503（业务码 `1001`）。
+
+分页字段的口径（每页条数固定 20，见 `client.RecordListPageSize`）：
+
+| 字段 | 含义 | 计算 |
+|---|---|---|
+| `count` | 符合条件的记录总数（不是本页条数） | 洛谷返回 |
+| `pageSize` | 每页条数 | 固定 20 |
+| `totalPages` | 总页数 | `ceil(count / pageSize)`，无记录时为 0 |
+| `pageRecordCount` | 本页条数 | 末页可能不满；页码超出总页数时为 0 |
+
+例如 `count=178`、`page=9` → `totalPages=9`、`pageRecordCount=18`（前 8 页各 20 条，
+第 9 页是末页，只有 18 条）。
 
 ## 校验
 
