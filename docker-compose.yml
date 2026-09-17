@@ -49,6 +49,9 @@ services:
         export MYSQL_ROOT_PASSWORD="$${DB_PASSWORD:?configs/.env 里没有配 DB_PASSWORD}"
         exec docker-entrypoint.sh "$$@"
       - entrypoint-shim
+    # 注意：compose 一旦指定 entrypoint，镜像自带的 CMD（mysqld）会被清空（实测 compose v5.5.1），
+    # 不补这行的话 shim 里 $@ 为空、entrypoint.sh 空转退出 0 → 容器无限重启。
+    command: ["mysqld"]
     volumes:
       - mysql-data:/var/lib/mysql
     healthcheck:
@@ -82,7 +85,7 @@ services:
       HTTP_ADDR: ":8080"
       TZ: Asia/Shanghai
     ports:
-      - "8080:8080"                  # 要换宿主端口就改这一行
+      - "8081:8080"                  # 要换宿主端口就改这一行（8080 已被其他项目占用）
     # 探活沿用镜像里的 HEALTHCHECK（只看 HTTP 服务本身，理由见 Dockerfile）
     stop_grace_period: 30s           # 覆盖默认 10s：留给 HTTP_SHUTDOWN_TIMEOUT 优雅关闭
     security_opt:
