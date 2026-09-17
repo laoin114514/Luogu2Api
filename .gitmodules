@@ -1,3 +1,0 @@
-[submodule "pkg/luoguClient"]
-	path = pkg/luoguClient
-	url = https://github.com/laoin114514/luoguClient.git

@@ -29,7 +29,7 @@ Luogu2Api/
 ├── configs/env.example          # 环境变量样例
 ├── scripts/check.ps1            # 一次跑通两个 module 的 build/vet/test
 ├── scripts/ocr_stub.py          # 本地联调用的假 OCR 服务
-└── pkg/luoguClient/             # 洛谷 SDK —— git submodule（独立仓库、独立发版）
+└── pkg/luoguClient/             # 洛谷 SDK —— git subtree（保留上游历史）
 ```
 
 ## 分层与依赖方向
@@ -380,6 +380,6 @@ go test ./internal/schema/ ./internal/repository/ -v
   也安全——加列对旧代码是透明的。
 - **已知限制**：SDK 的 `WithContext` 只在构造期生效，业务请求无法按调用方 ctx 取消，只能用
   `LUOGU_TIMEOUT` + `http.Server` 超时兜底。
-- **submodule**：`git clone --recursive`（CI 里 `submodules: true`），否则 `pkg/luoguClient` 为空、
-  构建失败；更新 SDK：`git submodule update --remote pkg/luoguClient` 后提交新的指针。
+- **subtree**：普通 `git clone` 即可，`pkg/luoguClient` 会随主仓库检出；更新 SDK：
+  `git subtree pull --prefix=pkg/luoguClient https://github.com/laoin114514/luoguClient.git main`。
 - `cookies.json` 相关的旧单文件登录态已随号池移除；凭据只存在数据库（密文）。

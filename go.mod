@@ -47,6 +47,6 @@ require (
 	google.golang.org/protobuf v1.36.10 // indirect
 )
 
-// SDK 以 git submodule 形式放在 pkg/luoguClient，用 replace 指向本地源码：
+// SDK 以 git subtree 形式放在 pkg/luoguClient，用 replace 指向本地源码：
 // 改 SDK 立即生效、无需发版。若要改为依赖已发布版本，删掉 replace 并写真实版本号即可。
 replace github.com/laoin114514/luoguClient => ./pkg/luoguClient
