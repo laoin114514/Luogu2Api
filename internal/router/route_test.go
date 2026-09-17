@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -170,5 +172,34 @@ func TestAdminRoutesRequireToken(t *testing.T) {
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("正确令牌时 status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+}
+
+// Dashboard 构建产物应由 Gin 同源托管，避免管理页面与 API 之间再配置跨域。
+func TestDashboardStaticHosting(t *testing.T) {
+	dashboardDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dashboardDir, "index.html"), []byte("<h1>Pool Dashboard</h1>"), 0o600); err != nil {
+		t.Fatalf("write dashboard index: %v", err)
+	}
+
+	// 此测试传入独立临时目录，防止其他路由单测依赖本地构建产物。
+	engine := New(Deps{
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Health:       handler.NewHealthHandler(stubHealth{report: service.HealthReport{Status: service.StatusOK}}),
+		Problem:      handler.NewProblemHandler(stubProblem{}),
+		Pool:         handler.NewPoolHandler(stubPool{}),
+		Account:      handler.NewAccountHandler(stubAccounts{}),
+		Env:          "test",
+		DashboardDir: dashboardDir,
+	})
+
+	rec := do(engine, http.MethodGet, "/dashboard", nil)
+	if rec.Code != http.StatusMovedPermanently || rec.Header().Get("Location") != "/dashboard/" {
+		t.Fatalf("dashboard redirect = %d location=%q", rec.Code, rec.Header().Get("Location"))
+	}
+
+	rec = do(engine, http.MethodGet, "/dashboard/", nil)
+	if rec.Code != http.StatusOK || rec.Body.String() != "<h1>Pool Dashboard</h1>" {
+		t.Fatalf("dashboard index = %d body=%q", rec.Code, rec.Body.String())
 	}
 }

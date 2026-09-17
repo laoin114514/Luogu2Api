@@ -10,6 +10,7 @@
 ```
 Luogu2Api/
 ├── cmd/api/main.go              # 入口：配置 → 日志 → MySQL → 号池预热 → 组装 → 启停
+├── Pool-Dashboard/              # pnpm + Vue 管理台（构建后由 Gin 在 /dashboard/ 托管）
 ├── internal/
 │   ├── client/                  # 唯一接触洛谷 SDK 的包
 │   │   ├── session.go           #   SessionClient 窄接口 + SDK 适配
@@ -269,6 +270,7 @@ ACCOUNT_SWEEP_INTERVAL`、抖动越界、密钥长度/编码非法、OCR 地址�
 | PATCH | `/api/v1/admin/accounts/:id` | `{"enabled":true/false}` 启停；启用 `disabled` 账号会复位状态交给扫描器重试 |
 | DELETE | `/api/v1/admin/accounts/:id` | 软删除并移出号池；**再次用同名 username 创建会自动复活原行**（主键不变，凭据/状态/档案全部重置，created_at 保留） |
 | POST | `/api/v1/admin/accounts/:id/relogin` | 强制立即重登 |
+| GET | `/dashboard/` | 号池管理台静态站点（需先构建 `Pool-Dashboard`） |
 
 业务码：`0` 成功、`400` 参数错、`401` 令牌无效、`404` 不存在、`409` 冲突、`500` 内部错误、
 `1001` 号池无可用账号（HTTP 503）、`1002` 洛谷登录态全部失效（HTTP 502）。
@@ -292,6 +294,35 @@ pwsh scripts/dev.ps1
 # Windows PowerShell 5.1 亦可（脚本带 UTF-8 BOM）：
 powershell -ExecutionPolicy Bypass -File scripts/dev.ps1
 ```
+
+### Pool Dashboard
+
+`Pool-Dashboard` 是一个独立的 pnpm + Vue + Element Plus 项目，构建产物不提交；Go 服务会将其同源托管在
+`/dashboard/`。它使用既有的管理 API 完成账号列表、导入、启停、删除和强制重登，不会接触或显示
+密码、cookie 等凭据。首次进入会用受保护的账号列表接口校验 `ADMIN_TOKEN`；令牌只保存在当前浏览器
+标签页的 `sessionStorage`，管理请求收到 `401` 会立刻清除令牌并回到登录页。
+
+```powershell
+# 首次或依赖变化后
+pnpm --dir Pool-Dashboard install
+
+# 产出 Pool-Dashboard/dist；运行中的 Go 服务会立即按 /dashboard/ 提供这些文件
+pnpm --dir Pool-Dashboard build
+
+# 开发时：Vite 自动把 /api 请求转发给本地 Go 服务（默认 127.0.0.1:8080）
+pnpm --dir Pool-Dashboard dev
+```
+
+浏览器访问 `http://127.0.0.1:8080/dashboard/`，输入与后端 `ADMIN_TOKEN` 一致的令牌即可使用。
+没有执行前端构建时，Go API 仍可正常启动，但 `/dashboard/` 没有可提供的页面文件。
+
+#### Vue 组件定位（开发调试）
+
+`http://127.0.0.1:8080/dashboard/` 是 Go 托管的 `pnpm build` 生产构建产物，Vue Devtools 不会
+在这里提供组件检查或页面定位。需要调试组件时，保持 Go 服务运行后执行
+`pnpm --dir Pool-Dashboard dev`，再按 Vite 终端输出的地址访问（通常是
+`http://localhost:5173/dashboard/`）。Vite 会把 `/api` 同源代理到 `127.0.0.1:8080`；同时需要在
+浏览器中安装并启用 Vue Devtools 扩展。不要为 Go 托管的管理台生产页强制开启 Devtools。
 
 不用脚本也可以照旧导出环境变量（**已存在的非空变量优先于 `.env`**，脚本与 compose
 的 `env_file` 都是这个优先级）：

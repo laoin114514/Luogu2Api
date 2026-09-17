@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -141,16 +142,23 @@ func run(addrOverride string, migrateOnly, schemaStatus bool) error {
 	problemService := service.NewProblemService(pool)
 	recordService := service.NewRecordService(pool)
 	poolService := service.NewPoolService(pool, cfg.Account.SweepInterval, logger)
+	// Dashboard 由 Vite 构建到项目根目录下的 Pool-Dashboard/dist，Gin 只负责
+	// 同源静态托管；因此前端调用管理接口时无需跨域配置。
+	dashboardDir, err := filepath.Abs(filepath.Join("Pool-Dashboard", "dist"))
+	if err != nil {
+		return fmt.Errorf("解析 Dashboard 静态目录失败: %w", err)
+	}
 
 	engine := router.New(router.Deps{
-		Logger:     logger,
-		Health:     handler.NewHealthHandler(healthService),
-		Problem:    handler.NewProblemHandler(problemService),
-		Record:     handler.NewRecordHandler(recordService),
-		Pool:       handler.NewPoolHandler(pool),
-		Account:    handler.NewAccountHandler(accountService),
-		Env:        cfg.App.Env,
-		AdminToken: cfg.Admin.Token,
+		Logger:       logger,
+		Health:       handler.NewHealthHandler(healthService),
+		Problem:      handler.NewProblemHandler(problemService),
+		Record:       handler.NewRecordHandler(recordService),
+		Pool:         handler.NewPoolHandler(pool),
+		Account:      handler.NewAccountHandler(accountService),
+		Env:          cfg.App.Env,
+		AdminToken:   cfg.Admin.Token,
+		DashboardDir: dashboardDir,
 	})
 
 	srv := &http.Server{
