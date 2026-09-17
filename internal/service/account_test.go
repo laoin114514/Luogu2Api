@@ -21,11 +21,16 @@ type fakeAccountStore struct {
 	revived    bool
 	deleted    []uint
 	enabledSet map[uint]bool
+	passwords  map[uint]string
 	states     []model.PoolState
 }
 
 func newFakeAccountStore(accounts ...*model.Account) *fakeAccountStore {
-	s := &fakeAccountStore{accounts: map[uint]*model.Account{}, enabledSet: map[uint]bool{}}
+	s := &fakeAccountStore{
+		accounts:   map[uint]*model.Account{},
+		enabledSet: map[uint]bool{},
+		passwords:  map[uint]string{},
+	}
 	for _, acc := range accounts {
 		s.accounts[acc.ID] = acc
 		if acc.ID > s.nextID {
@@ -74,6 +79,16 @@ func (s *fakeAccountStore) SetEnabled(_ context.Context, id uint, enabled bool) 
 	}
 	acc.Enabled = enabled
 	s.enabledSet[id] = enabled
+	return nil
+}
+
+func (s *fakeAccountStore) UpdatePassword(_ context.Context, id uint, password string) error {
+	acc, ok := s.accounts[id]
+	if !ok {
+		return model.ErrAccountNotFound
+	}
+	acc.Password = password
+	s.passwords[id] = password
 	return nil
 }
 
@@ -238,6 +253,88 @@ func TestCreatePropagatesDuplicate(t *testing.T) {
 
 	if _, err := svc.Create(context.Background(), "user1", "pwd", ""); !errors.Is(err, model.ErrAccountExists) {
 		t.Errorf("err = %v, want ErrAccountExists", err)
+	}
+}
+
+func TestUpdatePasswordValidatesInput(t *testing.T) {
+	svc := newTestAccountService(newFakeAccountStore(), &fakeAccountPool{})
+
+	tests := []struct {
+		name     string
+		password string
+	}{
+		{"空密码", ""},
+		{"超长密码", strings.Repeat("p", maxAccountPasswordBytes+1)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := svc.UpdatePassword(context.Background(), 1, tt.password); !errors.Is(err, ErrInvalidParam) {
+				t.Errorf("err = %v, want ErrInvalidParam", err)
+			}
+		})
+	}
+}
+
+func TestUpdatePasswordPersistsAndRelogsIn(t *testing.T) {
+	acc := sampleAccount(1)
+	store := newFakeAccountStore(acc)
+	pool := &fakeAccountPool{}
+	svc := newTestAccountService(store, pool)
+
+	dto, err := svc.UpdatePassword(context.Background(), 1, "new-password")
+	if err != nil {
+		t.Fatalf("UpdatePassword: %v", err)
+	}
+	if got := store.passwords[1]; got != "new-password" {
+		t.Errorf("passwords = %v", store.passwords)
+	}
+	if acc.Password != "new-password" {
+		t.Errorf("仓储中的密码 = %q", acc.Password)
+	}
+	if len(pool.relogined) != 1 || pool.relogined[0] != 1 {
+		t.Errorf("应触发一次重登，实际 %v", pool.relogined)
+	}
+	if dto.ID != 1 {
+		t.Errorf("dto = %+v", dto)
+	}
+}
+
+// 密码已可靠落库时，重登失败（网络/OCR 等）不应让接口失败
+func TestUpdatePasswordSucceedsEvenIfReloginFails(t *testing.T) {
+	store := newFakeAccountStore(sampleAccount(1))
+	pool := &fakeAccountPool{reloginEr: errors.New("OCR 不可用")}
+	svc := newTestAccountService(store, pool)
+
+	if _, err := svc.UpdatePassword(context.Background(), 1, "new-password"); err != nil {
+		t.Fatalf("UpdatePassword 不应因立即重登失败而报错: %v", err)
+	}
+	if got := store.passwords[1]; got != "new-password" {
+		t.Errorf("passwords = %v", store.passwords)
+	}
+}
+
+// banned 账号不会被扫描器自动重试，改密后也不应自动触发重登
+func TestUpdatePasswordSkipsReloginForBannedAccount(t *testing.T) {
+	acc := sampleAccount(1)
+	acc.Status = model.AccountStatusBanned
+	store := newFakeAccountStore(acc)
+	pool := &fakeAccountPool{}
+	svc := newTestAccountService(store, pool)
+
+	if _, err := svc.UpdatePassword(context.Background(), 1, "new-password"); err != nil {
+		t.Fatalf("UpdatePassword: %v", err)
+	}
+	if len(pool.relogined) != 0 {
+		t.Errorf("banned 账号不应自动重登，实际 %v", pool.relogined)
+	}
+}
+
+func TestUpdatePasswordMissingAccount(t *testing.T) {
+	svc := newTestAccountService(newFakeAccountStore(), &fakeAccountPool{})
+
+	if _, err := svc.UpdatePassword(context.Background(), 99, "new-password"); !errors.Is(err, model.ErrAccountNotFound) {
+		t.Errorf("err = %v, want ErrAccountNotFound", err)
 	}
 }
 

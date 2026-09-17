@@ -282,6 +282,7 @@ ACCOUNT_SWEEP_INTERVAL`、抖动越界、密钥长度/编码非法、OCR 地址�
 | POST | `/api/v1/admin/accounts` | 新增账号并尝试首次登录 |
 | GET | `/api/v1/admin/accounts/:id` | 账号详情 |
 | PATCH | `/api/v1/admin/accounts/:id` | `{"enabled":true/false}` 启停；启用 `disabled` 账号会复位状态交给扫描器重试 |
+| PUT | `/api/v1/admin/accounts/:id/password` | `{"password":"new-password"}` 修改数据库中的密码密文；启用且非 `banned` 的账号会立即用新密码重登验证，重登失败不报错（状态在响应 DTO 里） |
 | DELETE | `/api/v1/admin/accounts/:id` | 软删除并移出号池；**再次用同名 username 创建会自动复活原行**（主键不变，凭据/状态/档案全部重置，created_at 保留） |
 | POST | `/api/v1/admin/accounts/:id/relogin` | 强制立即重登 |
 | GET | `/dashboard/` | 号池管理台静态站点（需先构建 `Pool-Dashboard`） |
@@ -312,9 +313,10 @@ powershell -ExecutionPolicy Bypass -File scripts/dev.ps1
 ### Pool Dashboard
 
 `Pool-Dashboard` 是一个独立的 pnpm + Vue + Element Plus 项目，构建产物不提交；Go 服务会将其同源托管在
-`/dashboard/`。它使用既有的管理 API 完成账号列表、导入、启停、删除和强制重登，不会接触或显示
-密码、cookie 等凭据。首次进入会用受保护的账号列表接口校验 `ADMIN_TOKEN`；令牌只保存在当前浏览器
-标签页的 `sessionStorage`，管理请求收到 `401` 会立刻清除令牌并回到登录页。
+`/dashboard/`。它使用既有管理 API 完成账号列表、导入、启停、改密、删除和强制重登：改密只提交
+表单里的新密码，不会读取或显示数据库中已存储的密码密文、cookie 等凭据。首次进入会用受保护的账号
+列表接口校验 `ADMIN_TOKEN`；令牌只保存在当前浏览器标签页的 `sessionStorage`，管理请求收到 `401`
+会立刻清除令牌并回到登录页。
 
 ```powershell
 # 首次或依赖变化后

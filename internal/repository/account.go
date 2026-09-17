@@ -369,6 +369,23 @@ func (r *AccountRepository) MarkOpenSourceJoined(ctx context.Context, id uint, j
 	return nil
 }
 
+// UpdatePassword 更新账号登录密码（只改密文列，不碰 cookie 与号池状态）。
+//
+// 密码在 repository 层加密，确保调用方和数据库里都不会出现明文；写入随机 nonce
+// 使密文每次不同，因此即使新旧密码相同也会真实更新 password_enc。
+func (r *AccountRepository) UpdatePassword(ctx context.Context, id uint, password string) error {
+	if password == "" {
+		return errors.New("repository: password 不能为空")
+	}
+
+	encrypted, err := r.cipher.Seal(password)
+	if err != nil {
+		return fmt.Errorf("加密密码失败: %w", err)
+	}
+
+	return r.update(ctx, id, map[string]any{"password_enc": encrypted})
+}
+
 // SetEnabled 人工启停账号
 func (r *AccountRepository) SetEnabled(ctx context.Context, id uint, enabled bool) error {
 	return r.update(ctx, id, map[string]any{"enabled": enabled})

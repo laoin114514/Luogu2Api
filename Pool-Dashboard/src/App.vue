@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import {
   CircleCheckFilled,
   Connection,
@@ -36,8 +36,11 @@ const loginError = ref('')
 const sessionNotice = ref('')
 const loginFormRef = ref<FormInstance>()
 const accountFormRef = ref<FormInstance>()
+const passwordFormRef = ref<FormInstance>()
 const accountDialogOpen = ref(false)
+const passwordDialogOpen = ref(false)
 const detailDrawerOpen = ref(false)
+const passwordTarget = ref<Account>()
 const selectedAccount = ref<Account>()
 const accounts = ref<Account[]>([])
 const stats = ref<PoolStats>()
@@ -47,6 +50,7 @@ const currentView = ref<'overview' | 'accounts'>('overview')
 
 const loginForm = reactive({ token: '' })
 const accountForm = reactive({ username: '', password: '', nickname: '' })
+const passwordForm = reactive({ password: '', confirmPassword: '' })
 
 const loginRules: FormRules<typeof loginForm> = {
   token: [{ required: true, message: '请输入 ADMIN_TOKEN', trigger: 'blur' }],
@@ -59,6 +63,14 @@ const accountRules: FormRules<typeof accountForm> = {
   ],
   password: [{ required: true, message: '请输入登录密码', trigger: 'blur' }],
   nickname: [{ max: 64, message: '显示昵称不能超过 64 个字符', trigger: 'blur' }],
+}
+
+const passwordRules: FormRules<typeof passwordForm> = {
+  password: [
+    { required: true, message: '请输入新密码', trigger: 'blur' },
+    { max: 128, message: '新密码不能超过 128 个字符', trigger: 'blur' },
+  ],
+  confirmPassword: [{ required: true, message: '请再次输入新密码', trigger: 'blur' }],
 }
 
 const filteredAccounts = computed(() => {
@@ -209,6 +221,62 @@ async function createAccount(): Promise<void> {
   }
 }
 
+async function openPasswordDialog(account: Account): Promise<void> {
+  passwordTarget.value = account
+  passwordForm.password = ''
+  passwordForm.confirmPassword = ''
+  passwordDialogOpen.value = true
+  await nextTick()
+  passwordFormRef.value?.clearValidate()
+}
+
+function resetPasswordDialog(): void {
+  passwordForm.password = ''
+  passwordForm.confirmPassword = ''
+  passwordTarget.value = undefined
+}
+
+async function updatePassword(): Promise<void> {
+  const target = passwordTarget.value
+  if (!target) return
+
+  const valid = await passwordFormRef.value?.validate().catch(() => false)
+  if (!valid) return
+  if (passwordForm.password !== passwordForm.confirmPassword) {
+    ElMessage.warning('两次输入的新密码不一致')
+    return
+  }
+
+  actionLoading.value = true
+  try {
+    const account = await request<Account>(`/api/v1/admin/accounts/${target.id}/password`, {
+      method: 'PUT',
+      body: JSON.stringify({ password: passwordForm.password }),
+    })
+    passwordDialogOpen.value = false
+    if (selectedAccount.value?.id === account.id) {
+      selectedAccount.value = account
+    }
+
+    if (!account.enabled) {
+      ElMessage.success(`已更新 ${account.username} 的密码；账号当前已停用，启用后将使用新密码`)
+    } else if (account.status === 'banned') {
+      ElMessage.warning(`已更新 ${account.username} 的密码；账号当前被封禁，解封后重新启用即可`)
+    } else if (account.status === 'active' && account.online) {
+      ElMessage.success(`已更新 ${account.username} 的密码，并已用新密码重新登录`)
+    } else if (account.status === 'disabled' || account.status === 'relogin_failed') {
+      ElMessage.warning(`已更新 ${account.username} 的密码，但重登验证仍未通过，请查看账号状态`)
+    } else {
+      ElMessage.success(`已更新 ${account.username} 的密码，号池将继续验证`)
+    }
+    await loadDashboard()
+  } catch (cause) {
+    showRequestError(cause)
+  } finally {
+    actionLoading.value = false
+  }
+}
+
 async function setEnabled(account: Account, enabled: boolean): Promise<void> {
   await runAction(async () => {
     await request<Account>(`/api/v1/admin/accounts/${account.id}`, {
@@ -299,14 +367,15 @@ function statusLabel(status: AccountStatus): string {
 }
 
 function statusTagType(status: AccountStatus): 'success' | 'warning' | 'danger' | 'info' {
-  return {
+  const tagTypes: Record<AccountStatus, 'success' | 'warning' | 'danger' | 'info'> = {
     active: 'success',
     new: 'warning',
     relogin_pending: 'warning',
     relogin_failed: 'danger',
     disabled: 'info',
     banned: 'danger',
-  }[status]
+  }
+  return tagTypes[status]
 }
 
 function formatTime(value?: string): string {
@@ -473,10 +542,11 @@ onBeforeUnmount(() => setUnauthorizedHandler())
                 <el-table-column label="调度" width="120"><template #default="{ row }: { row: Account }"><el-tag :type="row.enabled && row.online ? 'success' : 'info'" effect="plain">{{ row.enabled ? (row.online ? '已调度' : '未就绪') : '已停用' }}</el-tag></template></el-table-column>
                 <el-table-column label="最近验证" width="170"><template #default="{ row }: { row: Account }">{{ formatTime(row.lastVerifiedAt || row.lastLoginAt) }}</template></el-table-column>
                 <el-table-column label="失败信息" min-width="170" show-overflow-tooltip><template #default="{ row }: { row: Account }">{{ row.lastError || '—' }}</template></el-table-column>
-                <el-table-column label="操作" width="216" fixed="right">
+                <el-table-column label="操作" width="270" fixed="right">
                   <template #default="{ row }: { row: Account }">
                     <div class="account-actions" @click.stop>
                       <el-button text type="primary" size="small" :loading="actionLoading" @click="relogin(row)">重登</el-button>
+                      <el-button text type="primary" size="small" :loading="actionLoading" @click="openPasswordDialog(row)">改密</el-button>
                       <el-button text type="primary" size="small" :loading="actionLoading" @click="setEnabled(row, !row.enabled)">{{ row.enabled ? '停用' : '启用' }}</el-button>
                       <el-button text type="danger" size="small" :loading="actionLoading" @click="deleteAccount(row)">删除</el-button>
                     </div>
@@ -499,6 +569,25 @@ onBeforeUnmount(() => setUnauthorizedHandler())
       <template #footer><el-button @click="accountDialogOpen = false">取消</el-button><el-button type="primary" :loading="actionLoading" @click="createAccount">确认导入</el-button></template>
     </el-dialog>
 
+    <el-dialog v-model="passwordDialogOpen" title="修改登录密码" width="440px" :close-on-click-modal="false" @closed="resetPasswordDialog">
+      <el-alert
+        :title="passwordTarget ? `即将修改 @${passwordTarget.username} 的登录密码` : '修改登录密码'"
+        description="新密码会加密后写入数据库；保存后号池将尝试用新密码重新登录，接口与页面都不会回显已存储的密码。"
+        type="warning"
+        :closable="false"
+        show-icon
+      />
+      <el-form ref="passwordFormRef" class="account-form" :model="passwordForm" :rules="passwordRules" label-position="top" @submit.prevent="updatePassword">
+        <el-form-item label="新密码" prop="password">
+          <el-input v-model="passwordForm.password" type="password" show-password maxlength="128" autocomplete="new-password" placeholder="输入新的登录密码" />
+        </el-form-item>
+        <el-form-item label="确认新密码" prop="confirmPassword">
+          <el-input v-model="passwordForm.confirmPassword" type="password" show-password maxlength="128" autocomplete="new-password" placeholder="再次输入新密码" />
+        </el-form-item>
+      </el-form>
+      <template #footer><el-button @click="passwordDialogOpen = false">取消</el-button><el-button type="primary" :loading="actionLoading" @click="updatePassword">保存新密码</el-button></template>
+    </el-dialog>
+
     <el-drawer v-model="detailDrawerOpen" size="360px" title="账号详情">
       <template v-if="selectedAccount">
         <div class="drawer-profile"><el-avatar :size="54" :src="selectedAccount.avatar">{{ (selectedAccount.nickname || selectedAccount.username).slice(0, 1).toUpperCase() }}</el-avatar><div><h2>{{ selectedAccount.nickname || selectedAccount.name || selectedAccount.username }}</h2><p>@{{ selectedAccount.username }}</p><el-tag :type="statusTagType(selectedAccount.status)">{{ statusLabel(selectedAccount.status) }}</el-tag></div></div>
@@ -510,6 +599,7 @@ onBeforeUnmount(() => setUnauthorizedHandler())
           <el-descriptions-item label="创建时间">{{ formatTime(selectedAccount.createdAt) }}</el-descriptions-item>
           <el-descriptions-item label="公开计划">{{ selectedAccount.openSourceJoined ? '已加入' : '未加入' }}</el-descriptions-item>
         </el-descriptions>
+        <el-button class="drawer-password" type="primary" plain @click="openPasswordDialog(selectedAccount)">修改登录密码</el-button>
         <el-alert v-if="selectedAccount.lastError" class="drawer-error" title="最近错误" :description="selectedAccount.lastError" type="error" :closable="false" show-icon />
       </template>
     </el-drawer>

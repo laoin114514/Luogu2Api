@@ -58,6 +58,9 @@ func (stubAccounts) List(context.Context) ([]service.AccountDTO, error) {
 func (stubAccounts) SetEnabled(context.Context, uint, bool) (service.AccountDTO, error) {
 	return service.AccountDTO{ID: 1}, nil
 }
+func (stubAccounts) UpdatePassword(context.Context, uint, string) (service.AccountDTO, error) {
+	return service.AccountDTO{ID: 1}, nil
+}
 func (stubAccounts) Delete(context.Context, uint) error { return nil }
 func (stubAccounts) Relogin(context.Context, uint) (service.AccountDTO, error) {
 	return service.AccountDTO{ID: 1}, nil

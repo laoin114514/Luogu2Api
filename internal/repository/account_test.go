@@ -121,6 +121,48 @@ func TestAccountCreateEncryptsCredentials(t *testing.T) {
 	}
 }
 
+func TestAccountUpdatePasswordEncryptsOnlyThatColumn(t *testing.T) {
+	repo, _ := newRepo(t)
+	ctx := context.Background()
+
+	acc := &model.Account{Username: repo.username("password"), Password: "old-pwd", Enabled: true}
+	if _, err := repo.Create(ctx, acc); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	now := time.Now().Truncate(time.Second)
+	if err := repo.SaveSession(ctx, acc.ID, `[{"name":"_uid","value":"1965145"}]`, 1965145,
+		model.LuoguProfile{Name: "昵称", RawJSON: `{"uid":1965145}`}, now, now.Add(time.Hour)); err != nil {
+		t.Fatalf("SaveSession: %v", err)
+	}
+	before, err := repo.GetByID(ctx, acc.ID)
+	if err != nil {
+		t.Fatalf("GetByID before: %v", err)
+	}
+
+	if err := repo.UpdatePassword(ctx, acc.ID, "new-pwd"); err != nil {
+		t.Fatalf("UpdatePassword: %v", err)
+	}
+
+	got, err := repo.GetByID(ctx, acc.ID)
+	if err != nil {
+		t.Fatalf("GetByID: %v", err)
+	}
+	if got.Password != "new-pwd" {
+		t.Errorf("Password = %q, want new-pwd", got.Password)
+	}
+	if got.PasswordSecret == "new-pwd" || !strings.HasPrefix(got.PasswordSecret, "v1:") {
+		t.Errorf("password_enc 应为 v1 密文，实际 %q", got.PasswordSecret)
+	}
+	if got.PasswordSecret == before.PasswordSecret {
+		t.Error("新密码应产生不同的密文")
+	}
+	if got.Cookie != before.Cookie || got.UIDValue() != before.UIDValue() ||
+		got.Status != before.Status || got.Online != before.Online {
+		t.Errorf("改密不应改动 cookie / UID / 号池状态: before=%+v after=%+v", before, got)
+	}
+}
+
 func TestAccountCreateRejectsDuplicateUsername(t *testing.T) {
 	repo, _ := newRepo(t)
 	ctx := context.Background()

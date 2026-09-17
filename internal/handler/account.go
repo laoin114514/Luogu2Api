@@ -17,6 +17,7 @@ type AccountAdmin interface {
 	Get(ctx context.Context, id uint) (service.AccountDTO, error)
 	List(ctx context.Context) ([]service.AccountDTO, error)
 	SetEnabled(ctx context.Context, id uint, enabled bool) (service.AccountDTO, error)
+	UpdatePassword(ctx context.Context, id uint, password string) (service.AccountDTO, error)
 	Delete(ctx context.Context, id uint) error
 	Relogin(ctx context.Context, id uint) (service.AccountDTO, error)
 }
@@ -42,6 +43,10 @@ type createAccountRequest struct {
 
 type updateAccountRequest struct {
 	Enabled *bool `json:"enabled"`
+}
+
+type updatePasswordRequest struct {
+	Password string `json:"password"`
 }
 
 // List 处理 GET /api/v1/admin/accounts
@@ -103,6 +108,31 @@ func (h *AccountHandler) Update(c *gin.Context) {
 	}
 
 	acc, err := h.accounts.SetEnabled(c.Request.Context(), id, *req.Enabled)
+	if err != nil {
+		Fail(c, err)
+		return
+	}
+	response.OK(c, acc)
+}
+
+// UpdatePassword 处理 PUT /api/v1/admin/accounts/:id/password
+func (h *AccountHandler) UpdatePassword(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+
+	var req updatePasswordRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.FailCode(c, http.StatusBadRequest, response.CodeInvalidParam, "请求体不是合法 JSON")
+		return
+	}
+	if req.Password == "" {
+		response.FailCode(c, http.StatusBadRequest, response.CodeInvalidParam, "password 不能为空")
+		return
+	}
+
+	acc, err := h.accounts.UpdatePassword(c.Request.Context(), id, req.Password)
 	if err != nil {
 		Fail(c, err)
 		return

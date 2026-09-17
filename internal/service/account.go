@@ -10,6 +10,12 @@ import (
 	"github.com/laoin114514/luogu2api/internal/model"
 )
 
+// maxAccountPasswordBytes 是登录密码允许的最大字节数。
+//
+// accounts.password_enc 为 varchar(512)，AES-GCM 密文经 base64 编码后字符数约是
+// 明文的 4/3；限制 128 字节可稳定落在列宽内，同时足够容纳常规洛谷密码。
+const maxAccountPasswordBytes = 128
+
 // AccountStore 账号管理所需的数据访问能力
 type AccountStore interface {
 	// Create 新建账号；若同名账号此前被软删除则复活它，revived=true
@@ -17,6 +23,8 @@ type AccountStore interface {
 	GetByID(ctx context.Context, id uint) (*model.Account, error)
 	ListAll(ctx context.Context) ([]*model.Account, error)
 	SetEnabled(ctx context.Context, id uint, enabled bool) error
+	// UpdatePassword 更新账号登录密码（repository 负责加密落库）
+	UpdatePassword(ctx context.Context, id uint, password string) error
 	UpdatePoolState(ctx context.Context, id uint, state model.PoolState) error
 	SoftDelete(ctx context.Context, id uint) error
 }
@@ -246,6 +254,40 @@ func (s *AccountService) SetEnabled(ctx context.Context, id uint, enabled bool) 
 
 	if err := s.pool.Load(ctx, id); err != nil {
 		s.logger.Warn("启用账号后未能载入号池", "account_id", id, "err", err)
+	}
+
+	return s.Get(ctx, id)
+}
+
+// UpdatePassword 修改账号登录密码，并在必要时立即用新密码重登验证。
+//
+// 密码密文由 repository 写入数据库。更新成功后，若账号处于人工启用状态且未被
+// 洛谷封禁，会立即触发一次重登：这既能让号池内存会话及时换用新密码，也能让
+// 因密码错误而 disabled 的账号有机会直接恢复。重登失败与 Create 的首次登录
+// 一样不让接口失败——密码已经可靠落库，账号状态通过返回的 DTO 如实呈现；
+// banned 账号不会被自动重试，需人工恢复（见 SetEnabled）。
+func (s *AccountService) UpdatePassword(ctx context.Context, id uint, password string) (AccountDTO, error) {
+	if password == "" {
+		return AccountDTO{}, fmt.Errorf("%w: password 不能为空", ErrInvalidParam)
+	}
+	if len(password) > maxAccountPasswordBytes {
+		return AccountDTO{}, fmt.Errorf("%w: password 不能超过 %d 字节", ErrInvalidParam, maxAccountPasswordBytes)
+	}
+
+	acc, err := s.store.GetByID(ctx, id)
+	if err != nil {
+		return AccountDTO{}, err
+	}
+	if err := s.store.UpdatePassword(ctx, id, password); err != nil {
+		return AccountDTO{}, err
+	}
+	s.logger.Info("账号登录密码已更新", "account_id", id, "username", acc.Username)
+
+	if acc.Enabled && acc.Status != model.AccountStatusBanned {
+		if err := s.pool.ForceRelogin(ctx, id); err != nil {
+			s.logger.Warn("密码已更新，但立即重登未成功",
+				"account_id", id, "username", acc.Username, "err", err)
+		}
 	}
 
 	return s.Get(ctx, id)

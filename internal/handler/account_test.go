@@ -23,10 +23,11 @@ type stubAccountAdmin struct {
 	account  service.AccountDTO
 	err      error
 
-	created  []string
-	enabled  map[uint]bool
-	deleted  []uint
-	relogins []uint
+	created   []string
+	enabled   map[uint]bool
+	passwords map[uint]string
+	deleted   []uint
+	relogins  []uint
 }
 
 func (s *stubAccountAdmin) Create(_ context.Context, username, password, nickname string) (service.AccountDTO, error) {
@@ -62,6 +63,17 @@ func (s *stubAccountAdmin) SetEnabled(_ context.Context, id uint, enabled bool) 
 	return s.account, nil
 }
 
+func (s *stubAccountAdmin) UpdatePassword(_ context.Context, id uint, password string) (service.AccountDTO, error) {
+	if s.passwords == nil {
+		s.passwords = map[uint]string{}
+	}
+	s.passwords[id] = password
+	if s.err != nil {
+		return service.AccountDTO{}, s.err
+	}
+	return s.account, nil
+}
+
 func (s *stubAccountAdmin) Delete(_ context.Context, id uint) error {
 	s.deleted = append(s.deleted, id)
 	return s.err
@@ -83,6 +95,7 @@ func newAccountEngine(admin AccountAdmin) *gin.Engine {
 	r.POST("/accounts", h.Create)
 	r.GET("/accounts/:id", h.Get)
 	r.PATCH("/accounts/:id", h.Update)
+	r.PUT("/accounts/:id/password", h.UpdatePassword)
 	r.DELETE("/accounts/:id", h.Delete)
 	r.POST("/accounts/:id/relogin", h.Relogin)
 	return r
@@ -228,6 +241,40 @@ func TestAccountUpdateRequiresEnabled(t *testing.T) {
 	}
 	if got, ok := admin.enabled[7]; !ok || got {
 		t.Errorf("enabled = %v", admin.enabled)
+	}
+}
+
+func TestAccountUpdatePasswordOK(t *testing.T) {
+	admin := &stubAccountAdmin{account: sampleDTO()}
+	engine := newAccountEngine(admin)
+
+	rec := doRequest(t, engine, http.MethodPut, "/accounts/7/password", `{"password":"new-secret"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	if got := admin.passwords[7]; got != "new-secret" {
+		t.Errorf("passwords = %v", admin.passwords)
+	}
+}
+
+func TestAccountUpdatePasswordRejectsBadRequest(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"空密码", `{"password":""}`},
+		{"非法 JSON", `{"password":`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			engine := newAccountEngine(&stubAccountAdmin{account: sampleDTO()})
+			rec := doRequest(t, engine, http.MethodPut, "/accounts/1/password", tt.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
+			}
+		})
 	}
 }
 
