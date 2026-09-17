@@ -1,0 +1,38 @@
+# 构建上下文白名单式地瘦身 + 挡住不该进镜像的本地文件。
+#
+# 最重要的一条：configs/.env 与任何 .env 都不能进镜像。二进制刻意不读 .env，
+# 镜像里残留一份配置就会让"忘记配置"变成"悄悄用上镜像里的值"，正好破坏 fail-fast
+# （见 README「环境变量」）。
+
+# --- 版本控制 ---
+.git
+.gitignore
+.gitmodules
+
+# --- 前端依赖与产物：镜像里重新 pnpm install / pnpm build ---
+# node_modules 里是 Windows 上装的 pnpm 虚拟 store（junction/软链），既不可移植又很大
+node_modules
+**/node_modules
+Pool-Dashboard/dist
+
+# --- 本地配置与凭据：绝不进镜像 ---
+.env
+.env.*
+configs/.env
+cookies.json
+
+# --- 构建/测试产物 ---
+/bin
+*.exe
+*.test
+*.out
+coverage.out
+.tmp-build
+
+# --- 编辑器与系统垃圾 ---
+.vscode
+.idea
+*.swp
+.DS_Store
+Thumbs.db
+*.log

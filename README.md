@@ -29,6 +29,9 @@ Luogu2Api/
 │   ├── secret/cipher.go         # AES-GCM 加解密（密码/cookie 落库前加密）
 │   └── service/                 # 业务层：health / pool 扫描器 / problem / record / account
 ├── configs/env.example          # 环境变量样例
+├── Dockerfile                   # 三段构建：pnpm 构建管理台 → Go 静态编译 → alpine 运行时
+├── docker-compose.yml           # api + MySQL 一键起栈（配置走变量插值，见「容器化部署」）
+├── .dockerignore                # 挡掉 node_modules、构建产物与所有 .env
 ├── scripts/check.ps1            # 一次跑通两个 module 的 build/vet/test
 ├── scripts/ocr_stub.py          # 本地联调用的假 OCR 服务
 └── pkg/luoguClient/             # 洛谷 SDK —— git submodule（指向独立仓库）
@@ -233,10 +236,10 @@ go run ./cmd/api -schema-status  # 只打印差异（只读：不建库、不改
 | 场景 | 怎么给配置 |
 |---|---|
 | 本地开发 | `pwsh scripts/dev.ps1`：把 `configs/.env` 导出到当前会话再 `go run`（见"本地运行"） |
-| 部署 | compose 的 `env_file: configs/.env` / `environment:`，或 k8s Secret、服务管理器的环境变量 |
+| 部署 | compose 的变量插值 + `environment:`（读同目录 `.env` 或 `--env-file configs/.env`，见「容器化部署」），或 k8s Secret、服务管理器的环境变量 |
 
 `configs/env.example` 是模板；`configs/.env` 已在 `.gitignore` 里，**不要**打进镜像
-（`COPY . .` 记得配 `.dockerignore`，否则上面那条 fail-fast 的保证就失效了）。
+（仓库里的 `.dockerignore` 已经挡掉 `.env` / `configs/.env`；否则上面那条 fail-fast 的保证就失效了）。
 
 必需项：
 
@@ -429,6 +432,66 @@ curl -s "http://127.0.0.1:8080/api/v1/users/1582049/records?page=1"
 
 例如 `count=178`、`page=9` → `totalPages=9`、`pageRecordCount=18`（前 8 页各 20 条，
 第 9 页是末页，只有 18 条）。
+
+## 容器化部署（Docker / Compose）
+
+一个镜像同时提供 API 与管理台（Gin 托管 `/dashboard/`），`docker-compose.yml` 再配一个 MySQL 8.4。
+
+| 文件 | 作用 |
+|---|---|
+| `Dockerfile` | 三段构建：pnpm 构建 `Pool-Dashboard` → Go 静态编译 `cmd/api` → alpine 运行时（非 root，自带 HEALTHCHECK、ca-certificates、tzdata） |
+| `docker-compose.yml` | `api` + `mysql`：库名/密码两边同源，默认自动建库建表，配置全部走变量插值 |
+| `.dockerignore` | 挡掉 `node_modules`、构建产物与**所有 `.env`**（配置只能由部署侧注入，这是 fail-fast 的前提） |
+
+```bash
+# 0) pkg/luoguClient 是 submodule——镜像里必须真有这份 SDK 源码，否则编译不过
+git submodule update --init --recursive
+
+# 1) 配置：compose 的变量插值默认读与本文件同目录的 .env
+cp configs/env.example .env   # 至少填 DB_PASSWORD、ACCOUNT_SECRET_KEY；建议设 ADMIN_TOKEN、APP_ENV=prod
+
+# 2) 起栈（首次或改了 Dockerfile/前端后加 --build）
+docker compose up -d --build
+
+# 3) 管理台 http://127.0.0.1:8080/dashboard/（ADMIN_TOKEN 留空 = 管理路由不注册）
+#    探活   http://127.0.0.1:8080/healthz  （号池没有在线账号时按设计返回 503）
+```
+
+已经有本地开发用的 `configs/.env` 时不必再复制一份，把它当插值来源即可——容器内的
+`DB_HOST`/`DB_PORT` 由 compose 覆盖成 `mysql:3306`，其余照用：
+
+```bash
+docker compose --env-file configs/.env up -d --build
+```
+
+只有 `docker-compose.yml` 的 `environment:` 里写出的变量才会进容器（值形如 `${VAR:-默认值}`），
+mysql 与 api 因此必然用同一套库名/密码，也不会出现"容器里悄悄连了开发库"。要加变量就照抄一行；
+必填项用 `${VAR:?...}` 声明，缺了会让 compose 直接报错退出（与二进制的 fail-fast 一致）。
+
+常用命令：
+
+```bash
+docker compose logs -f api                  # 看日志（APP_ENV=prod 时是 JSON）
+docker compose ps                           # 状态与健康检查结果
+docker compose run --rm api -migrate        # 只做结构变更（建库/建表/加列/建索引）
+docker compose run --rm api -schema-status  # 只打印库结构与模型的差异（只读）
+docker compose exec mysql mysql -uroot -p   # 进库排查（密码 = .env 里的 DB_PASSWORD）
+docker compose down                         # 停栈；加 -v 连数据卷一起删（账号数据会没）
+```
+
+容器相关的几点差异：
+
+- **结构迁移默认打开**（`DB_MIGRATE_ON_START=true`）：库不存在时自动建库建表，方便第一把就起来。
+  想改成"部署步骤显式迁移"就设成 `false`，改用上面的 `run --rm api -migrate`。
+- **时区**：DSN 默认 `loc=Local`，镜像装了 `tzdata` 并把 `TZ` 设为 `Asia/Shanghai`（可用 `TZ` 覆盖）；
+  api 与 mysql 的时区必须一致，否则时间列会偏移。
+- **端口**：容器内固定监听 `:8080`，宿主端口用 `HTTP_PORT`（默认 8080）改；`mysql` 默认不把 3306
+  暴露到宿主机（需要本机客户端连进去时，把 compose 里那两行 `ports` 的注释去掉）。
+- **探活**：镜像的 `HEALTHCHECK` 打的是恒定 200 的 `/api/v1/pool/status`。`/healthz` 在号池没有
+  在线账号时会返回 503（设计如此），首次部署还没导账号时会把容器判成 unhealthy，不适合当探针。
+- **多架构**：`docker buildx build --platform linux/amd64,linux/arm64 .` 可直接用（Go 段交叉编译，
+  Node 段跑在构建机上）；需要 BuildKit（Docker 23+ 默认开启）。
+- **单实例**：扫描器与号池都在进程内，多副本会互相踢会话，本栈刻意只起一个 api；其余约束见「部署注意」。
 
 ## 校验
 
