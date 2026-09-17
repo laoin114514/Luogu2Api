@@ -30,7 +30,7 @@ Luogu2Api/
 │   └── service/                 # 业务层：health / pool 扫描器 / problem / record / account
 ├── configs/env.example          # 环境变量样例
 ├── Dockerfile                   # 三段构建：pnpm 构建管理台 → Go 静态编译 → alpine 运行时
-├── docker-compose.yml           # api + MySQL 一键起栈（配置走变量插值，见「容器化部署」）
+├── docker-compose.yml           # api + MySQL 一键起栈（配置直接用 configs/.env，见「容器化部署」）
 ├── .dockerignore                # 挡掉 node_modules、构建产物与所有 .env
 ├── scripts/check.ps1            # 一次跑通两个 module 的 build/vet/test
 ├── scripts/ocr_stub.py          # 本地联调用的假 OCR 服务
@@ -236,7 +236,7 @@ go run ./cmd/api -schema-status  # 只打印差异（只读：不建库、不改
 | 场景 | 怎么给配置 |
 |---|---|
 | 本地开发 | `pwsh scripts/dev.ps1`：把 `configs/.env` 导出到当前会话再 `go run`（见"本地运行"） |
-| 部署 | compose 的变量插值 + `environment:`（读同目录 `.env` 或 `--env-file configs/.env`，见「容器化部署」），或 k8s Secret、服务管理器的环境变量 |
+| 部署 | compose 的 `env_file: configs/.env`（整份注入容器，见「容器化部署」），或 k8s Secret、服务管理器的环境变量 |
 
 `configs/env.example` 是模板；`configs/.env` 已在 `.gitignore` 里，**不要**打进镜像
 （仓库里的 `.dockerignore` 已经挡掉 `.env` / `configs/.env`；否则上面那条 fail-fast 的保证就失效了）。
@@ -440,15 +440,15 @@ curl -s "http://127.0.0.1:8080/api/v1/users/1582049/records?page=1"
 | 文件 | 作用 |
 |---|---|
 | `Dockerfile` | 三段构建：pnpm 构建 `Pool-Dashboard` → Go 静态编译 `cmd/api` → alpine 运行时（非 root，自带 HEALTHCHECK、ca-certificates、tzdata） |
-| `docker-compose.yml` | `api` + `mysql`：库名/密码两边同源，默认自动建库建表，配置全部走变量插值 |
+| `docker-compose.yml` | `api` + `mysql`：配置直接读 `configs/.env`（env_file 整份注入），compose 只覆盖容器里必然不同的四项 |
 | `.dockerignore` | 挡掉 `node_modules`、构建产物与**所有 `.env`**（配置只能由部署侧注入，这是 fail-fast 的前提） |
 
 ```bash
 # 0) pkg/luoguClient 是 submodule——镜像里必须真有这份 SDK 源码，否则编译不过
 git submodule update --init --recursive
 
-# 1) 配置：compose 的变量插值默认读与本文件同目录的 .env
-cp configs/env.example .env   # 至少填 DB_PASSWORD、ACCOUNT_SECRET_KEY；建议设 ADMIN_TOKEN、APP_ENV=prod
+# 1) 配置：容器读的就是本地开发那份 configs/.env（没有就先建一份）
+cp configs/env.example configs/.env   # 至少填 DB_PASSWORD、ACCOUNT_SECRET_KEY，建议设 ADMIN_TOKEN
 
 # 2) 起栈（首次或改了 Dockerfile/前端后加 --build）
 docker compose up -d --build
@@ -457,16 +457,17 @@ docker compose up -d --build
 #    探活   http://127.0.0.1:8080/healthz  （号池没有在线账号时按设计返回 503）
 ```
 
-已经有本地开发用的 `configs/.env` 时不必再复制一份，把它当插值来源即可——容器内的
-`DB_HOST`/`DB_PORT` 由 compose 覆盖成 `mysql:3306`，其余照用：
+配置规则只有两条：
 
-```bash
-docker compose --env-file configs/.env up -d --build
-```
+1. **`configs/.env` 是唯一来源**：`env_file` 把整份文件注入两个容器，所以里面加/改变量不用动
+   `docker-compose.yml`；必填项缺失仍由二进制自己 fail-fast，报错信息与本地开发一致。
+2. **compose 只覆盖容器里必然不同的四项**：`DB_HOST=mysql`、`DB_PORT=3306`、`HTTP_ADDR=:8080`、
+   `TZ`。`.env` 里那份 `DB_HOST=127.0.0.1` 是给本地开发用的，不会带进容器。
 
-只有 `docker-compose.yml` 的 `environment:` 里写出的变量才会进容器（值形如 `${VAR:-默认值}`），
-mysql 与 api 因此必然用同一套库名/密码，也不会出现"容器里悄悄连了开发库"。要加变量就照抄一行；
-必填项用 `${VAR:?...}` 声明，缺了会让 compose 直接报错退出（与二进制的 fail-fast 一致）。
+MySQL 的 root 密码取的也是 `.env` 里的 `DB_PASSWORD`，但 compose 的 `${}` 插值**不读** `env_file`，
+所以 mysql 服务在入口处做了一次改名（`export MYSQL_ROOT_PASSWORD="$DB_PASSWORD"` 后再交给官方
+entrypoint，见 `docker-compose.yml` 里的注释）。不喜欢这层壳的话，那里写了另外两条等价路线
+——要么在 `.env` 里再写一行同名密码，要么改成插值并给每条命令加上 `--env-file configs/.env`。
 
 常用命令：
 
@@ -481,12 +482,13 @@ docker compose down                         # 停栈；加 -v 连数据卷一起
 
 容器相关的几点差异：
 
-- **结构迁移默认打开**（`DB_MIGRATE_ON_START=true`）：库不存在时自动建库建表，方便第一把就起来。
-  想改成"部署步骤显式迁移"就设成 `false`，改用上面的 `run --rm api -migrate`。
-- **时区**：DSN 默认 `loc=Local`，镜像装了 `tzdata` 并把 `TZ` 设为 `Asia/Shanghai`（可用 `TZ` 覆盖）；
-  api 与 mysql 的时区必须一致，否则时间列会偏移。
-- **端口**：容器内固定监听 `:8080`，宿主端口用 `HTTP_PORT`（默认 8080）改；`mysql` 默认不把 3306
-  暴露到宿主机（需要本机客户端连进去时，把 compose 里那两行 `ports` 的注释去掉）。
+- **结构迁移跟着 `configs/.env` 走**（`DB_MIGRATE_ON_START`，env.example 里是 `true`）：库不存在时
+  自动建库建表，第一把就能起来。想改成"部署步骤显式迁移"就设成 `false`，改用上面的 `run --rm api -migrate`。
+- **时区**：DSN 默认 `loc=Local`，镜像装了 `tzdata`；compose 把两个容器的 `TZ` 都固定成
+  `Asia/Shanghai`（要改就同时改 mysql 与 api 两处——两边时区不一致，时间列会偏移）。
+- **端口**：容器内固定监听 `:8080`（`environment:` 覆盖 `.env` 里的本地值），宿主端口直接改
+  `docker-compose.yml` 里的 `8080:8080` 那一行；`mysql` 默认不把 3306 暴露到宿主机（需要本机客户端
+  连进去时，把那两行 `ports` 的注释去掉）。
 - **探活**：镜像的 `HEALTHCHECK` 打的是恒定 200 的 `/api/v1/pool/status`。`/healthz` 在号池没有
   在线账号时会返回 503（设计如此），首次部署还没导账号时会把容器判成 unhealthy，不适合当探针。
 - **多架构**：`docker buildx build --platform linux/amd64,linux/arm64 .` 可直接用（Go 段交叉编译，

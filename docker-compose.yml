@@ -1,23 +1,23 @@
 # Luogu2Api 一键起栈：api（含管理台，与 Dockerfile 同一个镜像）+ MySQL 8.4。
 #
-# 配置来源只有一个：compose 的变量插值。默认读与本文件同目录的 .env，
-# 也可以用 `docker compose --env-file configs/.env ...` 直接复用本地开发那份配置。
-# 只有下面 environment 里显式写出的变量才会进容器——这样 mysql 与 api 必然用同一套
-# 库名/密码，也不会出现"容器里悄悄连了开发库"的情况（与二进制的 fail-fast 一致）。
-# 想再加变量：照抄 `${VAR:-默认值}` 的形式补一行即可（完整清单见 configs/env.example）。
+# 配置只有一个来源：**configs/.env**——就是本地开发那份，scripts/dev.ps1 读的同一个文件。
+# compose 用 env_file 把整份文件注入容器，所以 .env 里加/改变量不用动本文件；
+# compose 只覆盖"容器里必然不同"的四项（DB_HOST / DB_PORT / HTTP_ADDR / TZ）。
+#
+# 为什么不用 `${VAR}` 插值：compose 的插值只读**与本文件同目录的 .env**，既不读 env_file，
+# 更不读 configs/.env。这里刻意绕开它——MySQL 的 root 密码由 mysql 的 entrypoint 从
+# DB_PASSWORD 改名而来（见下面的注释），密码因此只需要写一遍、命令也不需要 --env-file。
 #
 # 首次启动：
-#   cp configs/env.example .env      # 至少填 DB_PASSWORD / ACCOUNT_SECRET_KEY，建议设 ADMIN_TOKEN
+#   cp configs/env.example configs/.env    # 本地开发已经做过这步的话跳过
 #   docker compose up -d --build
-#   管理台：http://127.0.0.1:8080/dashboard/   （ADMIN_TOKEN 留空 = 管理路由不注册）
+#   管理台 http://127.0.0.1:8080/dashboard/（ADMIN_TOKEN 留空 = 管理路由不注册）
 #
-# 结构迁移：默认让服务启动时自动补齐安全变更（DB_MIGRATE_ON_START=true）。
-# 想改成"部署步骤显式迁移"：把 DB_MIGRATE_ON_START 设为 false，改用
-#   docker compose run --rm api -migrate           # 建库/建表/加列/建索引
-#   docker compose run --rm api -schema-status     # 只打印差异（只读）
+# 结构迁移：模型是唯一来源。库/表不存在时由服务自己补齐（DB_MIGRATE_ON_START=true，
+# 在 configs/.env 里）；不想让服务动结构就先 `docker compose run --rm api -migrate`。
 #
 # 依赖：pkg/luoguClient 是 git submodule，构建镜像前先 git submodule update --init --recursive。
-# 注意：扫描器与号池都在进程内，本栈只适合**单实例**部署（见 README「部署注意」）。
+# 单实例：扫描器与号池都在进程内，多副本会互相踢会话（见 README「部署注意」）。
 
 name: luogu2api
 
@@ -25,22 +25,37 @@ services:
   mysql:
     image: mysql:8.4
     restart: unless-stopped
+    env_file:
+      - configs/.env                 # 只用得到里面的 DB_PASSWORD
     environment:
-      # 密码只有一个来源：api 连库用的 DB_PASSWORD。为空直接让 compose 报错退出，
-      # 而不是生成一个 api 并不知道的随机 root 密码（那样只会变成难查的认证失败）。
-      MYSQL_ROOT_PASSWORD: "${DB_PASSWORD:?请在 .env（或 --env-file 指定的文件）里设置 DB_PASSWORD：compose 会把它同时用作 MySQL root 密码与 api 连库密码}"
       # 官方镜像默认只建 root@localhost，api 容器（另一个 network namespace）连不进来
       MYSQL_ROOT_HOST: "%"
-      # 建库交给 MySQL 自己做：库名与 api 用的 DB_NAME 必然一致；库不存在时
-      # 服务侧也会 CREATE DATABASE IF NOT EXISTS，两边都是幂等的。
-      MYSQL_DATABASE: "${DB_NAME:-luogu2api}"
-      TZ: "${TZ:-Asia/Shanghai}"
+      TZ: Asia/Shanghai
+    # 官方镜像认的是 MYSQL_ROOT_PASSWORD，而本项目的密码只有一处：.env 里的 DB_PASSWORD。
+    # 所以在这里做一次改名（export 会被下面的 exec 继承）再交给官方 entrypoint：
+    # 密码不写两遍，也不需要每条命令都带 --env-file。
+    # 不喜欢这层壳的话有两条替代路线，二选一即可：
+    #   a) 在 configs/.env 里再写一行 MYSQL_ROOT_PASSWORD=<同一个密码>（同一个值存两处），
+    #      并删掉下面的 entrypoint；
+    #   b) 保持 entrypoint 不变，但把本文件里的配置改成 `${DB_PASSWORD}` 插值，
+    #      并且每次都用 `docker compose --env-file configs/.env ...`。
+    #
+    # sh -c 的第一个参数是 $0，镜像的 CMD（mysqld）会作为参数接在后面 → $@ 原样转发；
+    # 以后要给 mysqld 加参数，用 command: 写，这里会自动透传。
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        export MYSQL_ROOT_PASSWORD="$${DB_PASSWORD:?configs/.env 里没有配 DB_PASSWORD}"
+        exec docker-entrypoint.sh "$$@"
+      - entrypoint-shim
     volumes:
       - mysql-data:/var/lib/mysql
     healthcheck:
-      # 初始化阶段跑的是 skip-networking 的临时实例，所以用 TCP + 一次真实查询判断
-      # "能连了、库也建好了"，而不是只看进程还在不在（ping 在鉴权失败时也会返回 0）。
-      test: ["CMD-SHELL", "mysql --protocol=TCP -h 127.0.0.1 -u root -p\"$$MYSQL_ROOT_PASSWORD\" -e 'SELECT 1' >/dev/null 2>&1"]
+      # 探针是新进程，看不到 PID 1 在 shell 里 export 的 MYSQL_ROOT_PASSWORD，
+      # 所以这里直接用 env_file 注进来的 DB_PASSWORD。
+      # 用 TCP + 一次真实查询判断"能连了"，初始化阶段（skip-networking）自然不通过。
+      test: ["CMD-SHELL", "mysql --protocol=TCP -h 127.0.0.1 -u root -p\"$$DB_PASSWORD\" -e 'SELECT 1' >/dev/null 2>&1"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -58,55 +73,18 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
-    ports:
-      - "${HTTP_PORT:-8080}:8080"
+    env_file:
+      - configs/.env                 # 整份注入：必填项、号池参数、ADMIN_TOKEN 全从这儿来
     environment:
-      # ---- 容器内固定值：不跟 .env 走 ----
-      # .env 里那份 DB_HOST=127.0.0.1 是本地开发用的，容器里必须指向 compose 的服务名
+      # 只覆盖容器里必然不同的四项；.env 里那份 DB_HOST=127.0.0.1 是给本地开发用的
       DB_HOST: mysql
       DB_PORT: "3306"
       HTTP_ADDR: ":8080"
-      TZ: "${TZ:-Asia/Shanghai}"
-      # 启动时自动补齐安全的结构变更（建库/建表/加列/建索引）；
-      # 需要人工确认的差异（删列/改类型）永远只报告不执行，见 README「数据库结构与迁移」
-      DB_MIGRATE_ON_START: "${DB_MIGRATE_ON_START:-true}"
-
-      # ---- 必填项（缺一个启动即报错，不让服务带病运行）----
-      DB_USER: "${DB_USER:-root}"
-      DB_PASSWORD: "${DB_PASSWORD:?请在 .env（或 --env-file 指定的文件）里设置 DB_PASSWORD：它同时是 MySQL root 密码与 api 连库密码}"
-      DB_NAME: "${DB_NAME:-luogu2api}"
-      ACCOUNT_SECRET_KEY: "${ACCOUNT_SECRET_KEY:?ACCOUNT_SECRET_KEY 必填：用 openssl rand -base64 32 生成（换密钥前必须先用旧密钥重新加密，见 README 部署注意）}"
-      LUOGU_OCR_URL: "${LUOGU_OCR_URL:?LUOGU_OCR_URL 必填：SDK 不内置 OCR，自动重登依赖验证码识别服务}"
-
-      # ---- 常用可调项：不填就用二进制里的默认值 ----
-      APP_NAME: "${APP_NAME:-luogu2api}"
-      APP_ENV: "${APP_ENV:-prod}"          # prod = JSON 日志 + gin release 模式
-      LOG_LEVEL: "${LOG_LEVEL:-info}"
-      ADMIN_TOKEN: "${ADMIN_TOKEN:-}"       # 留空 = 不注册管理路由（含 Dashboard 的导入/启停）
-      HTTP_SHUTDOWN_TIMEOUT: "${HTTP_SHUTDOWN_TIMEOUT:-10s}"
-      DB_SCHEMA_STRICT: "${DB_SCHEMA_STRICT:-true}"
-      DB_LOG_LEVEL: "${DB_LOG_LEVEL:-warn}"
-      DB_PARAMS: "${DB_PARAMS:-charset=utf8mb4&parseTime=True&loc=Local}"
-      DB_MAX_OPEN_CONNS: "${DB_MAX_OPEN_CONNS:-50}"
-      DB_MAX_IDLE_CONNS: "${DB_MAX_IDLE_CONNS:-10}"
-      DB_CONN_MAX_LIFETIME: "${DB_CONN_MAX_LIFETIME:-1h}"
-      LUOGU_TIMEOUT: "${LUOGU_TIMEOUT:-30s}"
-      LUOGU_RETRY: "${LUOGU_RETRY:-1}"
-      LUOGU_OCR_MODE: "${LUOGU_OCR_MODE:-base64}"
-      LUOGU_OCR_TOKEN: "${LUOGU_OCR_TOKEN:-}"
-      LUOGU_OCR_TIMEOUT: "${LUOGU_OCR_TIMEOUT:-5s}"
-      ACCOUNT_SWEEP_INTERVAL: "${ACCOUNT_SWEEP_INTERVAL:-5m}"
-      ACCOUNT_VERIFY_INTERVAL: "${ACCOUNT_VERIFY_INTERVAL:-30m}"
-      ACCOUNT_VERIFY_JITTER: "${ACCOUNT_VERIFY_JITTER:-0.2}"
-      ACCOUNT_VERIFY_CONCURRENCY: "${ACCOUNT_VERIFY_CONCURRENCY:-1}"
-      ACCOUNT_LOGIN_MAX_ATTEMPTS: "${ACCOUNT_LOGIN_MAX_ATTEMPTS:-5}"
-      ACCOUNT_LOGIN_BACKOFF: "${ACCOUNT_LOGIN_BACKOFF:-1m}"
-      ACCOUNT_FAILED_RETRY: "${ACCOUNT_FAILED_RETRY:-1h}"
-      ACCOUNT_REQUEST_MAX_TRY: "${ACCOUNT_REQUEST_MAX_TRY:-3}"
-      ACCOUNT_SWEEP_BATCH_LIMIT: "${ACCOUNT_SWEEP_BATCH_LIMIT:-200}"
-      ACCOUNT_JOIN_OPEN_SOURCE: "${ACCOUNT_JOIN_OPEN_SOURCE:-false}"   # 不可逆：加入洛谷代码公开计划后 30 天不能退出
+      TZ: Asia/Shanghai
+    ports:
+      - "8080:8080"                  # 要换宿主端口就改这一行
     # 探活沿用镜像里的 HEALTHCHECK（只看 HTTP 服务本身，理由见 Dockerfile）
-    stop_grace_period: 30s                  # 覆盖默认 10s：留给 HTTP_SHUTDOWN_TIMEOUT 优雅关闭
+    stop_grace_period: 30s           # 覆盖默认 10s：留给 HTTP_SHUTDOWN_TIMEOUT 优雅关闭
     security_opt:
       - no-new-privileges:true
 
