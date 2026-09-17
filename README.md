@@ -264,21 +264,26 @@ go run ./cmd/api -schema-status  # 只打印差异（只读：不建库、不改
 | `ACCOUNT_LOGIN_MAX_ATTEMPTS` | `5` | 单次重登任务的尝试次数 |
 | `ACCOUNT_REQUEST_MAX_TRY` | `3` | 业务请求最多换几个账号 |
 | `ACCOUNT_JOIN_OPEN_SOURCE` | `false` | 让池内账号加入洛谷"代码公开计划"（**不可逆 30 天**，见上节）；关闭时仍会只读同步远端状态 |
-| `ADMIN_TOKEN` | 空 | 为空则**不注册**管理路由（fail closed） |
+| `ADMIN_TOKEN` | 空 | `/api/v1` **全部接口**的访问令牌（`X-Admin-Token`）。为空时中间件拒绝所有 API 请求（fail closed，只有探活接口可用），实际部署必须设置 |
 
 配置校验：缺少必填项、`DB_MAX_IDLE_CONNS > DB_MAX_OPEN_CONNS`、`ACCOUNT_VERIFY_INTERVAL <
 ACCOUNT_SWEEP_INTERVAL`、抖动越界、密钥长度/编码非法、OCR 地址缺协议头，都会在启动时直接报错。
 
 ## 接口
 
+除 `/healthz`、`/livez` 两个探活接口外，**所有接口**都要求在请求头带
+`X-Admin-Token: <ADMIN_TOKEN>`；缺失或不匹配一律 **401**（业务码 `401`）。令牌不区分
+"业务"与"管理"：题目、提交记录、号池状态、账号管理共用同一个 `ADMIN_TOKEN`。
+
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/healthz` | 健康检查。号池没有在线账号或数据库不可用 → **503**，便于探活摘实例 |
+| GET | `/healthz` | 健康检查（就绪）。号池没有在线账号或数据库不可用 → **503**，便于探活摘实例 |
+| GET | `/livez` | 存活探针。进程能处理 HTTP 就返回 200，不检查数据库/号池；容器 `HEALTHCHECK` 用它 |
 | GET | `/api/v1/pool/status` | 号池快照（在线/待重登/失败/停用/封禁数、最近一轮扫描统计） |
 | GET | `/api/v1/problems/:pid` | 题目详情（走号池选号 + 失效换号重试） |
 | GET | `/api/v1/problems?keyword=&page=&pageSize=` | 题目搜索 |
 | GET | `/api/v1/users/:uid/records?pid=&status=&page=` | 指定洛谷用户的提交记录（走号池选号；`pid`/`status` 可选过滤） |
-| GET | `/api/v1/admin/accounts` | 账号列表（**需 `X-Admin-Token`**） |
+| GET | `/api/v1/admin/accounts` | 账号列表 |
 | POST | `/api/v1/admin/accounts` | 新增账号并尝试首次登录 |
 | GET | `/api/v1/admin/accounts/:id` | 账号详情 |
 | PATCH | `/api/v1/admin/accounts/:id` | `{"enabled":true/false}` 启停；启用 `disabled` 账号会复位状态交给扫描器重试 |
@@ -358,11 +363,13 @@ curl -s -X POST http://127.0.0.1:8080/api/v1/admin/accounts \
   -H "X-Admin-Token: dev-token" -H "Content-Type: application/json" \
   -d '{"username":"your-luogu-user","password":"your-password","nickname":"小号1"}'
 
-# 5) 观察号池与业务接口
+# 5) 观察号池与业务接口（除探活外都要与 ADMIN_TOKEN 一致的令牌）
+TOKEN=dev-token
 curl -s http://127.0.0.1:8080/healthz
-curl -s http://127.0.0.1:8080/api/v1/pool/status
-curl -s http://127.0.0.1:8080/api/v1/problems/P1001
-curl -s "http://127.0.0.1:8080/api/v1/users/1582049/records?page=1"
+curl -s http://127.0.0.1:8080/livez
+curl -s -H "X-Admin-Token: $TOKEN" http://127.0.0.1:8080/api/v1/pool/status
+curl -s -H "X-Admin-Token: $TOKEN" http://127.0.0.1:8080/api/v1/problems/P1001
+curl -s -H "X-Admin-Token: $TOKEN" "http://127.0.0.1:8080/api/v1/users/1582049/records?page=1"
 ```
 
 健康检查响应：
@@ -450,13 +457,14 @@ curl -s "http://127.0.0.1:8080/api/v1/users/1582049/records?page=1"
 git submodule update --init --recursive
 
 # 1) 配置：容器读的就是本地开发那份 configs/.env（没有就先建一份）
-cp configs/env.example configs/.env   # 至少填 DB_PASSWORD、ACCOUNT_SECRET_KEY，建议设 ADMIN_TOKEN
+cp configs/env.example configs/.env   # 至少填 DB_PASSWORD、ACCOUNT_SECRET_KEY、ADMIN_TOKEN（不设则除探活外全部 401）
 
 # 2) 起栈（首次或改了 Dockerfile/前端后加 --build）
 docker compose up -d --build
 
-# 3) 管理台 http://127.0.0.1:8080/dashboard/（ADMIN_TOKEN 留空 = 管理路由不注册）
-#    探活   http://127.0.0.1:8080/healthz  （号池没有在线账号时按设计返回 503）
+# 3) 管理台 http://127.0.0.1:8080/dashboard/（ADMIN_TOKEN 留空 = /api/v1 接口一律拒绝）
+#    探活   http://127.0.0.1:8080/healthz（就绪；号池没有在线账号时按设计返回 503）
+#           http://127.0.0.1:8080/livez  （存活；恒定 200）
 ```
 
 配置规则只有两条：
@@ -491,8 +499,9 @@ docker compose down                         # 停栈；加 -v 连数据卷一起
 - **端口**：容器内固定监听 `:8080`（`environment:` 覆盖 `.env` 里的本地值），宿主端口直接改
   `docker-compose.yml` 里的 `8080:8080` 那一行；`mysql` 默认不把 3306 暴露到宿主机（需要本机客户端
   连进去时，把那两行 `ports` 的注释去掉）。
-- **探活**：镜像的 `HEALTHCHECK` 打的是恒定 200 的 `/api/v1/pool/status`。`/healthz` 在号池没有
-  在线账号时会返回 503（设计如此），首次部署还没导账号时会把容器判成 unhealthy，不适合当探针。
+- **探活**：镜像的 `HEALTHCHECK` 打的是恒定 200 的 `/livez`（只看进程存活）。`/healthz` 在号池没有
+  在线账号时会返回 503（设计如此），首次部署还没导账号时会把容器判成 unhealthy，不适合当探针；
+  `/api/v1/**` 全部要令牌，探针也不该带。
 - **多架构**：`docker buildx build --platform linux/amd64,linux/arm64 .` 可直接用（Go 段交叉编译，
   Node 段跑在构建机上）；需要 BuildKit（Docker 23+ 默认开启）。
 - **单实例**：扫描器与号池都在进程内，多副本会互相踢会话，本栈刻意只起一个 api；其余约束见「部署注意」。
@@ -532,7 +541,8 @@ go test ./internal/schema/ ./internal/repository/ -v
   `ACCOUNT_VERIFY_CONCURRENCY=1`、给 `ACCOUNT_VERIFY_INTERVAL` 留足抖动，不要为了"更快发现掉线"
   把验证间隔调到分钟级。
 - **凭据不能进日志**：日志只记 `account_id/username/status/错误类型`。管理接口返回 DTO，
-  永不含 `password`/`cookie`；`ADMIN_TOKEN` 必须设置，否则管理路由不注册（避免裸奔的号池管理入口）。
+  永不含 `password`/`cookie`；`ADMIN_TOKEN` 必须设置——`/api/v1` 全部接口都要 `X-Admin-Token`，
+  未配置时中间件拒绝所有 API 请求（只有 `/healthz`、`/livez` 可用），避免裸奔的接口。
 - **代码公开计划是不可逆的**：开启 `ACCOUNT_JOIN_OPEN_SOURCE` 后账号会陆续加入洛谷"代码公开计划"，
   加入后 **30 天内不能退出**（洛谷直接拒绝把 `openSource` 改回 `0`/`-1`），期间账号代码公开。
   开启前请确认这是你要的；关掉开关只停止"继续加入"，**不会**把已加入的账号退出来。

@@ -66,7 +66,7 @@ func (stubAccounts) Relogin(context.Context, uint) (service.AccountDTO, error) {
 	return service.AccountDTO{ID: 1}, nil
 }
 
-func newEngine(adminToken string) *gin.Engine {
+func newEngine(token string) *gin.Engine {
 	return New(Deps{
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Health: handler.NewHealthHandler(stubHealth{report: service.HealthReport{
@@ -79,7 +79,7 @@ func newEngine(adminToken string) *gin.Engine {
 		Pool:       handler.NewPoolHandler(stubPool{}),
 		Account:    handler.NewAccountHandler(stubAccounts{}),
 		Env:        "test",
-		AdminToken: adminToken,
+		AdminToken: token,
 	})
 }
 
@@ -94,6 +94,11 @@ func do(engine *gin.Engine, method, path string, headers map[string]string) *htt
 	return rec
 }
 
+// withToken 是携带正确令牌的请求头
+func withToken(token string) map[string]string {
+	return map[string]string{middleware.HeaderAdminToken: token}
+}
+
 func decode(t *testing.T, rec *httptest.ResponseRecorder) response.Body {
 	t.Helper()
 
@@ -104,24 +109,72 @@ func decode(t *testing.T, rec *httptest.ResponseRecorder) response.Body {
 	return body
 }
 
-func TestRoutesAreRegistered(t *testing.T) {
-	engine := newEngine("")
+// 探活接口是仅有的公开入口：/healthz（就绪，会 503）与 /livez（存活，恒定 200）
+func TestHealthEndpointsArePublic(t *testing.T) {
+	engine := newEngine("s3cret")
+
+	for _, path := range []string{"/healthz", "/livez"} {
+		rec := do(engine, http.MethodGet, path, nil)
+		if rec.Code != http.StatusOK {
+			t.Errorf("GET %s = %d, want 200 (body=%s)", path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// 除探活外，所有接口都必须带令牌：业务只读接口与管理接口一视同仁
+func TestAPIRoutesRequireToken(t *testing.T) {
+	engine := newEngine("s3cret")
+
+	tests := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/api/v1/pool/status"},
+		{http.MethodGet, "/api/v1/problems?keyword=排序"},
+		{http.MethodGet, "/api/v1/problems/P1001"},
+		{http.MethodGet, "/api/v1/users/42/records"},
+		{http.MethodGet, "/api/v1/users/42/records?pid=P1001&status=12&page=2"},
+		{http.MethodGet, "/api/v1/admin/accounts"},
+		{http.MethodGet, "/api/v1/admin/accounts/1"},
+		{http.MethodPost, "/api/v1/admin/accounts/1/relogin"},
+	}
+
+	for _, tt := range tests {
+		rec := do(engine, tt.method, tt.path, nil)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s 缺少令牌 = %d, want 401 (body=%s)", tt.method, tt.path, rec.Code, rec.Body.String())
+			continue
+		}
+		if body := decode(t, rec); body.Code != response.CodeUnauthorized {
+			t.Errorf("%s %s 业务码 = %d, want %d", tt.method, tt.path, body.Code, response.CodeUnauthorized)
+		}
+
+		rec = do(engine, tt.method, tt.path, withToken("wrong"))
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s 令牌错误 = %d, want 401 (body=%s)", tt.method, tt.path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// 带上正确令牌后，业务与管理接口照常工作
+func TestAPIRoutesWorkWithToken(t *testing.T) {
+	engine := newEngine("s3cret")
 
 	tests := []struct {
 		method string
 		path   string
 		want   int
 	}{
-		{http.MethodGet, "/healthz", http.StatusOK},
 		{http.MethodGet, "/api/v1/pool/status", http.StatusOK},
-		{http.MethodGet, "/api/v1/problems/P1001", http.StatusOK},
 		{http.MethodGet, "/api/v1/problems?keyword=排序", http.StatusOK},
+		{http.MethodGet, "/api/v1/problems/P1001", http.StatusOK},
 		{http.MethodGet, "/api/v1/users/42/records", http.StatusOK},
 		{http.MethodGet, "/api/v1/users/42/records?pid=P1001&status=12&page=2", http.StatusOK},
+		{http.MethodGet, "/api/v1/admin/accounts", http.StatusOK},
 	}
 
 	for _, tt := range tests {
-		rec := do(engine, tt.method, tt.path, nil)
+		rec := do(engine, tt.method, tt.path, withToken("s3cret"))
 		if rec.Code != tt.want {
 			t.Errorf("%s %s = %d, want %d (body=%s)", tt.method, tt.path, rec.Code, tt.want, rec.Body.String())
 		}
@@ -145,13 +198,41 @@ func TestUnknownRouteAndMethod(t *testing.T) {
 	}
 }
 
-// ADMIN_TOKEN 未配置时管理路由根本不注册（fail closed）
+// ADMIN_TOKEN 未配置时不注册管理路由（fail closed）
 func TestAdminRoutesAreNotRegisteredWithoutToken(t *testing.T) {
 	engine := newEngine("")
 
 	rec := do(engine, http.MethodGet, "/api/v1/admin/accounts", nil)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+// 服务端没配置令牌时，业务接口也一律拒绝：客户端自带什么令牌都不放行（fail closed）
+func TestAPIRoutesAreClosedWithoutConfiguredToken(t *testing.T) {
+	engine := newEngine("")
+
+	paths := []string{
+		"/api/v1/pool/status",
+		"/api/v1/problems/P1001",
+		"/api/v1/users/42/records",
+	}
+
+	for _, path := range paths {
+		rec := do(engine, http.MethodGet, path, nil)
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("GET %s = %d, want 401（服务端未配置令牌时也必须拒绝）", path, rec.Code)
+		}
+
+		rec = do(engine, http.MethodGet, path, withToken("anything"))
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("GET %s（自带令牌）= %d, want 401", path, rec.Code)
+		}
+	}
+
+	// 探活不受影响
+	if rec := do(engine, http.MethodGet, "/healthz", nil); rec.Code != http.StatusOK {
+		t.Errorf("GET /healthz = %d, want 200", rec.Code)
 	}
 }
 
@@ -163,16 +244,12 @@ func TestAdminRoutesRequireToken(t *testing.T) {
 		t.Fatalf("缺少令牌时 status = %d, want 401", rec.Code)
 	}
 
-	rec = do(engine, http.MethodGet, "/api/v1/admin/accounts", map[string]string{
-		middleware.HeaderAdminToken: "wrong",
-	})
+	rec = do(engine, http.MethodGet, "/api/v1/admin/accounts", withToken("wrong"))
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("错误令牌时 status = %d, want 401", rec.Code)
 	}
 
-	rec = do(engine, http.MethodGet, "/api/v1/admin/accounts", map[string]string{
-		middleware.HeaderAdminToken: "s3cret",
-	})
+	rec = do(engine, http.MethodGet, "/api/v1/admin/accounts", withToken("s3cret"))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("正确令牌时 status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
 	}

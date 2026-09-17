@@ -11,7 +11,7 @@
 # 首次启动：
 #   cp configs/env.example configs/.env    # 本地开发已经做过这步的话跳过
 #   docker compose up -d --build
-#   管理台 http://127.0.0.1:8080/dashboard/（ADMIN_TOKEN 留空 = 管理路由不注册）
+#   管理台 http://127.0.0.1:8080/dashboard/（ADMIN_TOKEN 是 /api/v1 全部接口的令牌，留空 = 接口一律拒绝）
 #
 # 结构迁移：模型是唯一来源。库/表不存在时由服务自己补齐（DB_MIGRATE_ON_START=true，
 # 在 configs/.env 里）；不想让服务动结构就先 `docker compose run --rm api -migrate`。

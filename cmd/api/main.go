@@ -133,7 +133,7 @@ func run(addrOverride string, migrateOnly, schemaStatus bool) error {
 	logger.Info("号池预热完成",
 		"total", warm.Total, "serving", warm.Serving, "pending", warm.Pending, "failed", warm.Failed)
 	if warm.Total == 0 {
-		logger.Warn("号池为空：请通过管理接口导入账号（未配置 ADMIN_TOKEN 时管理路由不会注册）")
+		logger.Warn("号池为空：请通过管理接口导入账号（需要 ADMIN_TOKEN，见 configs/env.example）")
 	}
 
 	// 依赖注入：service 依赖 repository/client 的窄接口，handler 依赖 service
@@ -147,6 +147,12 @@ func run(addrOverride string, migrateOnly, schemaStatus bool) error {
 	dashboardDir, err := filepath.Abs(filepath.Join("Pool-Dashboard", "dist"))
 	if err != nil {
 		return fmt.Errorf("解析 Dashboard 静态目录失败: %w", err)
+	}
+
+	// 除 /healthz、/livez 两个探活接口外，所有接口都要令牌；没配令牌时等于
+	// 关闭了整个 API，必须显式提醒，避免"服务起来了但请求全是 401"被当成故障排查。
+	if !cfg.Admin.Enabled() {
+		logger.Warn("未配置 ADMIN_TOKEN：除 /healthz、/livez 外的所有接口都会返回 401")
 	}
 
 	engine := router.New(router.Deps{
@@ -185,7 +191,7 @@ func run(addrOverride string, migrateOnly, schemaStatus bool) error {
 		logger.Info("HTTP 服务启动",
 			"addr", cfg.HTTP.Addr,
 			"env", cfg.App.Env,
-			"admin_enabled", cfg.Admin.Enabled(),
+			"api_token_enabled", cfg.Admin.Enabled(),
 			"sweep_interval", cfg.Account.SweepInterval.String(),
 			"join_open_source", cfg.Account.JoinOpenSource,
 		)

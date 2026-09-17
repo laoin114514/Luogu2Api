@@ -190,12 +190,14 @@ type OCR struct {
 	Timeout time.Duration
 }
 
-// Admin HTTP 管理接口配置
+// Admin 接口令牌配置（ADMIN_TOKEN）
 type Admin struct {
-	Token string // 为空时不注册管理路由（fail closed）
+	// Token 是 /api/v1 全部接口的访问令牌（请求头 X-Admin-Token）。
+	// 为空时中间件拒绝所有 API 请求，且管理路由不注册（fail closed）。
+	Token string
 }
 
-// Enabled 管理接口是否可用
+// Enabled 接口令牌是否已配置（API 接口是否可用）
 func (a Admin) Enabled() bool { return a.Token != "" }
 
 // Load 从环境变量读取配置并校验

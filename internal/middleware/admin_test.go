@@ -31,7 +31,8 @@ func TestAdminAuthAcceptsValidToken(t *testing.T) {
 	}
 }
 
-// token 为空时管理路由本就不该注册；这里再兜一层，确保不会"无令牌即放行"
+// token 为空时路由本就不该注册，业务接口则被中间件一律拒绝；这里再兜一层，
+// 确保中间件本身绝不"无令牌即放行"
 func TestAdminAuthRejectsMissingOrWrongToken(t *testing.T) {
 	tests := []struct {
 		name   string

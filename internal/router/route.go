@@ -26,7 +26,9 @@ type Deps struct {
 	// DashboardDir 是 Pool-Dashboard 的 Vite 构建目录。为空时不注册静态站点，
 	// 便于 HTTP 路由单测以及只运行 API 的场景。
 	DashboardDir string
-	// AdminToken 为空时不注册管理路由（fail closed），避免无鉴权的号池管理入口
+	// AdminToken 是 /api/v1 全部接口的访问令牌（请求头 X-Admin-Token）。
+	// 为空时中间件拒绝所有 API 请求，且管理路由不注册（fail closed），
+	// 避免出现无鉴权的接口。
 	AdminToken string
 }
 
@@ -46,10 +48,16 @@ func New(deps Deps) *gin.Engine {
 	r.NoRoute(func(c *gin.Context) { response.NotFound(c) })
 	r.NoMethod(func(c *gin.Context) { response.MethodNotAllowed(c) })
 
-	// 健康检查：供探活使用，无需认证
+	// 探活接口：无需认证，是仅有的两个公开入口。
+	//   /healthz 是就绪探针：数据库不可用或号池没有在线账号时按设计返回 503；
+	//   /livez   是存活探针：只看进程还能不能处理 HTTP，恒定 200。
 	r.GET("/healthz", deps.Health.Get)
+	r.GET("/livez", deps.Health.Live)
 
-	v1 := r.Group("/api/v1")
+	// 除上面两个探活接口外，/api/v1 下的**所有**接口都要令牌：业务只读接口
+	// （号池状态、题目、提交记录）与管理接口一视同仁，统一在分组上挂中间件，
+	// 后续新增的路由默认就在保护范围内，不需要各自记得加。
+	v1 := r.Group("/api/v1", middleware.AdminAuth(deps.AdminToken))
 
 	// 号池状态：只读、不含凭据，便于运维查看在线账号数
 	v1.GET("/pool/status", deps.Pool.Status)
@@ -61,9 +69,11 @@ func New(deps Deps) *gin.Engine {
 	// 用户提交记录：按洛谷 UID 查询，可选按题目 / 状态过滤
 	v1.GET("/users/:uid/records", deps.Record.ListByUser)
 
-	// 管理路由：号池导入/启停/改密/强制重登，必须携带 X-Admin-Token
+	// 管理路由：号池导入/启停/改密/强制重登。令牌校验已由 v1 分组统一负责；
+	// ADMIN_TOKEN 为空时整组不注册（保持 fail closed：返回 404 而不是 401，
+	// 便于管理台区分"服务端没启用管理接口"与"令牌不对"）。
 	if deps.AdminToken != "" && deps.Account != nil {
-		admin := v1.Group("/admin", middleware.AdminAuth(deps.AdminToken))
+		admin := v1.Group("/admin")
 		admin.GET("/accounts", deps.Account.List)
 		admin.POST("/accounts", deps.Account.Create)
 		admin.GET("/accounts/:id", deps.Account.Get)

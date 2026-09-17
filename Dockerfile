@@ -97,10 +97,11 @@ USER app
 EXPOSE 8080
 
 # 探活只看 HTTP 服务本身：/healthz 在"号池没有在线账号"时按设计返回 503（degraded），
-# 首次部署还没导账号时会把容器判成 unhealthy，所以这里用恒定 200 的号池状态接口；
+# 首次部署还没导账号时会把容器判成 unhealthy；/api/v1/** 又全部要 ADMIN_TOKEN，
+# 探针既拿不到也不该拿令牌。所以用同样公开、但恒定 200 的存活探针 /livez；
 # DB 与号池的真实健康看 /healthz 与日志。
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD wget -q -O /dev/null http://127.0.0.1:8080/api/v1/pool/status || exit 1
+    CMD wget -q -O /dev/null http://127.0.0.1:8080/livez || exit 1
 
 # 参数直接透传：-migrate（只做结构变更）、-schema-status（只打印差异）、-addr（改监听地址）
 ENTRYPOINT ["/app/luogu2api"]

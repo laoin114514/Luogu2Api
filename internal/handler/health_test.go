@@ -34,6 +34,31 @@ func doGet(t *testing.T, r *gin.Engine) *httptest.ResponseRecorder {
 	return rec
 }
 
+// /livez 是纯存活探针：不调用健康检查业务，依赖全挂也返回 200
+func TestLiveAlwaysReturnsOK(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.GET("/livez", NewHealthHandler(stubChecker{report: service.HealthReport{
+		Status: service.StatusDegraded,
+		DB:     service.ComponentStatus{Status: service.StatusError, Error: "connection refused"},
+	}}).Live)
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/livez", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+
+	var body response.Body
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if body.Code != response.CodeOK || body.Message != service.StatusOK {
+		t.Errorf("body = %+v", body)
+	}
+}
+
 func TestHealthOK(t *testing.T) {
 	report := service.HealthReport{
 		Status: service.StatusOK,
