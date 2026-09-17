@@ -43,6 +43,7 @@ const accounts = ref<Account[]>([])
 const stats = ref<PoolStats>()
 const search = ref('')
 const statusFilter = ref<'all' | AccountStatus>('all')
+const currentView = ref<'overview' | 'accounts'>('overview')
 
 const loginForm = reactive({ token: '' })
 const accountForm = reactive({ username: '', password: '', nickname: '' })
@@ -82,6 +83,23 @@ const poolSegments = computed(() => {
     { label: '停用或封禁', value: (stats.value?.disabled ?? 0) + (stats.value?.banned ?? 0), percentage: ratio((stats.value?.disabled ?? 0) + (stats.value?.banned ?? 0)), color: '#909399' },
   ]
 })
+
+const availabilityRate = computed(() => {
+  const total = stats.value?.total ?? 0
+  return total === 0 ? 0 : Math.round(((stats.value?.online ?? 0) / total) * 100)
+})
+
+const attentionAccounts = computed(() => accounts.value
+  .filter((account) => !account.enabled || ['relogin_failed', 'disabled', 'banned'].includes(account.status))
+  .sort((left, right) => Number(left.enabled) - Number(right.enabled))
+  .slice(0, 5))
+
+const attentionCount = computed(() => (stats.value?.reloginFailed ?? 0) + (stats.value?.disabled ?? 0) + (stats.value?.banned ?? 0))
+
+const pageTitle = computed(() => currentView.value === 'overview' ? '号池看板' : '账号管理')
+const pageDescription = computed(() => currentView.value === 'overview'
+  ? '查看调度健康度、异常账号和号池维护建议。'
+  : '导入、筛选并维护号池账号；点击账号行可查看详情。')
 
 async function bootstrap(): Promise<void> {
   setUnauthorizedHandler(() => endSession('管理令牌无效或已失效，请重新登录'))
@@ -242,6 +260,18 @@ function openAccountDialog(): void {
   accountDialogOpen.value = true
 }
 
+function selectView(view: string): void {
+  if (view === 'overview' || view === 'accounts') {
+    currentView.value = view
+  }
+}
+
+function openAccounts(status: 'all' | AccountStatus = 'all'): void {
+  currentView.value = 'accounts'
+  search.value = ''
+  statusFilter.value = status
+}
+
 function openDetail(account: Account): void {
   selectedAccount.value = account
   detailDrawerOpen.value = true
@@ -324,7 +354,7 @@ onBeforeUnmount(() => setUnauthorizedHandler())
     <el-container v-else class="dashboard-layout">
       <el-aside width="230px" class="dashboard-aside">
         <div class="brand"><el-icon :size="25"><Connection /></el-icon><span>Pool Dashboard<small>LUOGU2API</small></span></div>
-        <el-menu default-active="overview" class="dashboard-menu">
+        <el-menu :default-active="currentView" class="dashboard-menu" @select="selectView">
           <el-menu-item index="overview"><el-icon><Connection /></el-icon><span>号池看板</span></el-menu-item>
           <el-menu-item index="accounts"><el-icon><UserFilled /></el-icon><span>账号管理</span></el-menu-item>
         </el-menu>
@@ -336,77 +366,125 @@ onBeforeUnmount(() => setUnauthorizedHandler())
 
       <el-container>
         <el-header class="dashboard-header">
-          <div><h1>号池看板</h1><p>监测账号可用性，并通过管理接口维护号池。</p></div>
+          <div><h1>{{ pageTitle }}</h1><p>{{ pageDescription }}</p></div>
           <div class="header-actions">
-            <el-tooltip content="刷新号池快照"><el-button circle :icon="Refresh" :loading="dashboardLoading" @click="loadDashboard" /></el-tooltip>
-            <el-button type="primary" :icon="Plus" @click="openAccountDialog">导入账号</el-button>
+            <el-tooltip content="刷新账号和号池快照"><el-button circle :icon="Refresh" :loading="dashboardLoading" @click="loadDashboard" /></el-tooltip>
+            <el-button v-if="currentView === 'accounts'" type="primary" :icon="Plus" @click="openAccountDialog">导入账号</el-button>
+            <el-button v-else type="primary" :icon="UserFilled" @click="openAccounts()">管理账号</el-button>
           </div>
         </el-header>
 
         <el-main class="dashboard-main">
-          <el-row :gutter="16" class="stat-grid">
-            <el-col v-for="segment in poolSegments" :key="segment.label" :xs="24" :sm="12" :lg="6">
-              <el-card shadow="never" class="stat-card">
-                <el-statistic :value="segment.value"><template #title><span>{{ segment.label }}</span></template></el-statistic>
-                <el-progress :percentage="segment.percentage" :color="segment.color" :show-text="false" :stroke-width="6" />
-                <small>占号池 {{ segment.percentage }}%</small>
-              </el-card>
-            </el-col>
-          </el-row>
+          <template v-if="currentView === 'overview'">
+            <el-row :gutter="16" class="stat-grid">
+              <el-col v-for="segment in poolSegments" :key="segment.label" :xs="24" :sm="12" :lg="6">
+                <el-card shadow="never" class="stat-card">
+                  <el-statistic :value="segment.value"><template #title><span>{{ segment.label }}</span></template></el-statistic>
+                  <el-progress :percentage="segment.percentage" :color="segment.color" :show-text="false" :stroke-width="6" />
+                  <small>占号池 {{ segment.percentage }}%</small>
+                </el-card>
+              </el-col>
+            </el-row>
 
-          <el-row :gutter="16" class="overview-row">
-            <el-col :xs="24" :lg="15">
-              <el-card shadow="never" class="overview-card">
-                <template #header><div class="card-title"><span>运行概览</span><el-tag type="info" effect="plain">最后扫描：{{ formatTime(stats?.lastSweepAt) }}</el-tag></div></template>
-                <el-descriptions :column="2" border>
-                  <el-descriptions-item label="账号总数">{{ stats?.total ?? 0 }}</el-descriptions-item>
-                  <el-descriptions-item label="当前在线"><el-tag type="success">{{ stats?.online ?? 0 }} 个可调度</el-tag></el-descriptions-item>
-                  <el-descriptions-item label="待恢复">{{ stats?.reloginPending ?? 0 }} 个等待验证或重登</el-descriptions-item>
-                  <el-descriptions-item label="人工处理">{{ (stats?.reloginFailed ?? 0) + (stats?.disabled ?? 0) + (stats?.banned ?? 0) }} 个需要关注</el-descriptions-item>
-                </el-descriptions>
-              </el-card>
-            </el-col>
-            <el-col :xs="24" :lg="9">
-              <el-card shadow="never" class="overview-card state-guide">
-                <template #header><span class="card-title">状态说明</span></template>
-                <p><el-icon color="#67c23a"><CircleCheckFilled /></el-icon><span><strong>在线可用</strong>：可以被业务请求选中</span></p>
-                <p><el-icon color="#e6a23c"><Timer /></el-icon><span><strong>等待恢复</strong>：扫描器将继续验证或重登</span></p>
-                <p><el-icon color="#f56c6c"><WarningFilled /></el-icon><span><strong>需要处理</strong>：检查凭据、封禁状态或 OCR 环境</span></p>
-              </el-card>
-            </el-col>
-          </el-row>
+            <el-row :gutter="16" class="overview-row">
+              <el-col :xs="24" :lg="15">
+                <el-card shadow="never" class="overview-card health-card">
+                  <template #header><div class="card-title"><span>调度健康度</span><el-tag type="info" effect="plain">最后扫描：{{ formatTime(stats?.lastSweepAt) }}</el-tag></div></template>
+                  <div class="health-card__body">
+                    <el-progress type="dashboard" :percentage="availabilityRate" :width="148" :stroke-width="10" color="#409eff">
+                      <template #default="{ percentage }"><strong>{{ percentage }}%</strong><small>可调度率</small></template>
+                    </el-progress>
+                    <div class="health-card__details">
+                      <strong>{{ stats?.online ?? 0 }} 个账号正在提供服务</strong>
+                      <p>号池当前共有 {{ stats?.total ?? 0 }} 个账号；{{ stats?.reloginPending ?? 0 }} 个会由扫描器继续验证或重登。</p>
+                      <div class="health-card__metrics">
+                        <span><b>{{ stats?.online ?? 0 }}</b> 在线可用</span>
+                        <span><b>{{ stats?.reloginPending ?? 0 }}</b> 等待恢复</span>
+                        <span><b :class="{ 'is-attention': attentionCount > 0 }">{{ attentionCount }}</b> 需要处理</span>
+                      </div>
+                    </div>
+                  </div>
+                </el-card>
+              </el-col>
+              <el-col :xs="24" :lg="9">
+                <el-card shadow="never" class="overview-card state-guide">
+                  <template #header><span class="card-title">运行状态说明</span></template>
+                  <p><el-icon color="#67c23a"><CircleCheckFilled /></el-icon><span><strong>在线可用</strong>：可以被业务请求选中</span></p>
+                  <p><el-icon color="#e6a23c"><Timer /></el-icon><span><strong>等待恢复</strong>：扫描器将继续验证或重登</span></p>
+                  <p><el-icon color="#f56c6c"><WarningFilled /></el-icon><span><strong>需要处理</strong>：检查凭据、封禁状态或 OCR 环境</span></p>
+                  <el-button text type="primary" @click="openAccounts()">前往账号管理</el-button>
+                </el-card>
+              </el-col>
+            </el-row>
 
-          <el-card shadow="never" class="account-card">
-            <template #header>
-              <div class="card-title account-card__title">
-                <span>账号管理</span>
-                <div class="account-filters">
-                  <el-input v-model="search" clearable :prefix-icon="UserFilled" placeholder="搜索账号、昵称或 UID" />
-                  <el-select v-model="statusFilter" aria-label="账号状态筛选">
-                    <el-option label="全部状态" value="all" />
-                    <el-option label="可用" value="active" /><el-option label="待登录" value="new" />
-                    <el-option label="待重登" value="relogin_pending" /><el-option label="重登失败" value="relogin_failed" />
-                    <el-option label="已停用" value="disabled" /><el-option label="已封禁" value="banned" />
-                  </el-select>
+            <el-row :gutter="16" class="overview-row">
+              <el-col :xs="24" :lg="15">
+                <el-card shadow="never" class="overview-card attention-card">
+                  <template #header>
+                    <div class="card-title"><span>待处理账号</span><el-button text type="primary" @click="openAccounts()">查看全部</el-button></div>
+                  </template>
+                  <el-table :data="attentionAccounts" :show-header="false" :empty-text="'当前没有需要人工处理的账号'">
+                    <el-table-column min-width="240">
+                      <template #default="{ row }: { row: Account }">
+                        <div class="account-profile"><el-avatar :size="32" :src="row.avatar">{{ (row.nickname || row.username).slice(0, 1).toUpperCase() }}</el-avatar><div><strong>{{ row.nickname || row.name || row.username }}</strong><small>@{{ row.username }} · {{ row.lastError || statusLabel(row.status) }}</small></div></div>
+                      </template>
+                    </el-table-column>
+                    <el-table-column width="116"><template #default="{ row }: { row: Account }"><el-tag :type="statusTagType(row.status)" effect="light">{{ statusLabel(row.status) }}</el-tag></template></el-table-column>
+                    <el-table-column width="92" align="right"><template #default="{ row }: { row: Account }"><el-button text type="primary" @click="openAccounts(row.status)">处理</el-button></template></el-table-column>
+                  </el-table>
+                </el-card>
+              </el-col>
+              <el-col :xs="24" :lg="9">
+                <el-card shadow="never" class="overview-card maintenance-card">
+                  <template #header><span class="card-title">维护建议</span></template>
+                  <div class="maintenance-item"><el-icon color="#409eff"><Connection /></el-icon><span><strong>查看调度健康度</strong>可调度率会基于在线账号实时计算。</span></div>
+                  <div class="maintenance-item"><el-icon color="#e6a23c"><Timer /></el-icon><span><strong>等待恢复无需重复操作</strong>扫描器会自动验证和重登。</span></div>
+                  <div class="maintenance-item"><el-icon color="#f56c6c"><WarningFilled /></el-icon><span><strong>异常账号需要人工检查</strong>修复后可在账号管理中重新启用。</span></div>
+                  <el-button v-if="attentionCount > 0" class="maintenance-card__action" type="warning" plain @click="openAccounts()">处理异常账号</el-button>
+                </el-card>
+              </el-col>
+            </el-row>
+          </template>
+
+          <section v-else class="accounts-page">
+            <el-card shadow="never" class="account-card">
+              <template #header>
+                <div class="card-title account-card__title">
+                  <div><span>全部账号</span><small class="account-card__count">共 {{ accounts.length }} 个账号</small></div>
+                  <div class="account-filters">
+                    <el-input v-model="search" clearable :prefix-icon="UserFilled" placeholder="搜索账号、昵称或 UID" />
+                    <el-select v-model="statusFilter" aria-label="账号状态筛选">
+                      <el-option label="全部状态" value="all" />
+                      <el-option label="可用" value="active" /><el-option label="待登录" value="new" />
+                      <el-option label="待重登" value="relogin_pending" /><el-option label="重登失败" value="relogin_failed" />
+                      <el-option label="已停用" value="disabled" /><el-option label="已封禁" value="banned" />
+                    </el-select>
+                  </div>
                 </div>
-              </div>
-            </template>
+              </template>
 
-            <el-table v-loading="dashboardLoading" :data="filteredAccounts" row-key="id" :empty-text="search || statusFilter !== 'all' ? '没有匹配的账号' : '号池还没有账号，点击右上角导入'" @row-click="openDetail">
-              <el-table-column label="账号" min-width="210">
-                <template #default="{ row }: { row: Account }">
-                  <div class="account-profile"><el-avatar :size="34" :src="row.avatar">{{ (row.nickname || row.username).slice(0, 1).toUpperCase() }}</el-avatar><div><strong>{{ row.nickname || row.name || row.username }}</strong><small>@{{ row.username }} · {{ row.luoguUid || 'UID 未知' }}</small></div></div>
-                </template>
-              </el-table-column>
-              <el-table-column label="状态" width="118"><template #default="{ row }: { row: Account }"><el-tag :type="statusTagType(row.status)" effect="light">{{ statusLabel(row.status) }}</el-tag></template></el-table-column>
-              <el-table-column label="调度" width="120"><template #default="{ row }: { row: Account }"><el-tag :type="row.enabled && row.online ? 'success' : 'info'" effect="plain">{{ row.enabled ? (row.online ? '已调度' : '未就绪') : '已停用' }}</el-tag></template></el-table-column>
-              <el-table-column label="最近验证" width="170"><template #default="{ row }: { row: Account }">{{ formatTime(row.lastVerifiedAt || row.lastLoginAt) }}</template></el-table-column>
-              <el-table-column label="失败信息" min-width="170" show-overflow-tooltip><template #default="{ row }: { row: Account }">{{ row.lastError || '—' }}</template></el-table-column>
-              <el-table-column label="操作" width="216" fixed="right">
-                <template #default="{ row }: { row: Account }"><el-button text type="primary" :loading="actionLoading" @click.stop="relogin(row)">重登</el-button><el-button text type="primary" :loading="actionLoading" @click.stop="setEnabled(row, !row.enabled)">{{ row.enabled ? '停用' : '启用' }}</el-button><el-button text type="danger" :loading="actionLoading" @click.stop="deleteAccount(row)">删除</el-button></template>
-              </el-table-column>
-            </el-table>
-          </el-card>
+              <el-table v-loading="dashboardLoading" :data="filteredAccounts" row-key="id" :empty-text="search || statusFilter !== 'all' ? '没有匹配的账号' : '号池还没有账号，点击右上角导入'" @row-click="openDetail">
+                <el-table-column label="账号" min-width="210">
+                  <template #default="{ row }: { row: Account }">
+                    <div class="account-profile"><el-avatar :size="34" :src="row.avatar">{{ (row.nickname || row.username).slice(0, 1).toUpperCase() }}</el-avatar><div><strong>{{ row.nickname || row.name || row.username }}</strong><small>@{{ row.username }} · {{ row.luoguUid || 'UID 未知' }}</small></div></div>
+                  </template>
+                </el-table-column>
+                <el-table-column label="状态" width="118"><template #default="{ row }: { row: Account }"><el-tag :type="statusTagType(row.status)" effect="light">{{ statusLabel(row.status) }}</el-tag></template></el-table-column>
+                <el-table-column label="调度" width="120"><template #default="{ row }: { row: Account }"><el-tag :type="row.enabled && row.online ? 'success' : 'info'" effect="plain">{{ row.enabled ? (row.online ? '已调度' : '未就绪') : '已停用' }}</el-tag></template></el-table-column>
+                <el-table-column label="最近验证" width="170"><template #default="{ row }: { row: Account }">{{ formatTime(row.lastVerifiedAt || row.lastLoginAt) }}</template></el-table-column>
+                <el-table-column label="失败信息" min-width="170" show-overflow-tooltip><template #default="{ row }: { row: Account }">{{ row.lastError || '—' }}</template></el-table-column>
+                <el-table-column label="操作" width="216" fixed="right">
+                  <template #default="{ row }: { row: Account }">
+                    <div class="account-actions" @click.stop>
+                      <el-button text type="primary" size="small" :loading="actionLoading" @click="relogin(row)">重登</el-button>
+                      <el-button text type="primary" size="small" :loading="actionLoading" @click="setEnabled(row, !row.enabled)">{{ row.enabled ? '停用' : '启用' }}</el-button>
+                      <el-button text type="danger" size="small" :loading="actionLoading" @click="deleteAccount(row)">删除</el-button>
+                    </div>
+                  </template>
+                </el-table-column>
+              </el-table>
+            </el-card>
+          </section>
         </el-main>
       </el-container>
     </el-container>

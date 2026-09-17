@@ -1,0 +1,30 @@
+.health-card__body { display: flex; align-items: center; gap: 28px; min-height: 172px; padding: 2px 6px; }
+.health-card .el-progress__text strong,
+.health-card .el-progress__text small { display: block; }
+.health-card .el-progress__text strong { color: #303133; font-size: 25px; line-height: 1.15; }
+.health-card .el-progress__text small { margin-top: 4px; color: #909399; font-size: 12px; font-weight: 400; }
+.health-card__details { flex: 1; min-width: 0; }
+.health-card__details > strong { color: #303133; font-size: 18px; }
+.health-card__details > p { margin: 9px 0 18px; color: #606266; font-size: 13px; line-height: 1.6; }
+.health-card__metrics { display: flex; flex-wrap: wrap; gap: 9px; }
+.health-card__metrics span { padding: 6px 9px; border-radius: 4px; background: #f4f8ff; color: #606266; font-size: 12px; }
+.health-card__metrics b { margin-right: 3px; color: #409eff; font-size: 14px; }
+.health-card__metrics b.is-attention { color: #f56c6c; }
+
+.state-guide .el-button { margin-top: 2px; padding-left: 0; }
+.attention-card .el-card__header,
+.maintenance-card .el-card__header { padding: 14px 20px; }
+.attention-card .el-table { --el-table-border-color: transparent; }
+.attention-card .el-table::before { display: none; }
+.attention-card .el-table td.el-table__cell { padding: 9px 0; }
+
+.maintenance-card { min-height: 100%; }
+.maintenance-item { display: flex; align-items: flex-start; gap: 9px; padding: 8px 0; color: #606266; font-size: 12px; line-height: 1.6; }
+.maintenance-item .el-icon { flex: 0 0 auto; margin-top: 2px; }
+.maintenance-item strong { display: block; color: #303133; font-size: 13px; }
+.maintenance-card__action { width: 100%; margin-top: 10px; }
+
+.accounts-page { min-height: 520px; }
+.accounts-page .account-card { margin-top: 0; }
+.account-card__title > div:first-child { display: flex; align-items: baseline; gap: 8px; }
+.account-card__count { color: #909399; font-size: 12px; font-weight: 400; }

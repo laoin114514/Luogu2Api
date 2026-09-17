@@ -6,6 +6,7 @@ import 'element-plus/es/components/message-box/style/css'
 
 import App from './App.vue'
 import './styles.css'
+import './dashboard.css'
 
 createApp(App)
   .directive('loading', vLoading)
