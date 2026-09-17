@@ -7,3 +7,4 @@
 # 登录态与本地配置：cookies.json 内含会话凭据，禁止提交
 cookies.json
 .env
+package-lock.json
