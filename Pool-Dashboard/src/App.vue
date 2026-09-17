@@ -50,7 +50,7 @@ const currentView = ref<'overview' | 'accounts'>('overview')
 
 const loginForm = reactive({ token: '' })
 const accountForm = reactive({ username: '', password: '', nickname: '' })
-const passwordForm = reactive({ password: '', confirmPassword: '' })
+const passwordForm = reactive({ password: '' })
 
 const loginRules: FormRules<typeof loginForm> = {
   token: [{ required: true, message: '请输入 ADMIN_TOKEN', trigger: 'blur' }],
@@ -70,7 +70,6 @@ const passwordRules: FormRules<typeof passwordForm> = {
     { required: true, message: '请输入新密码', trigger: 'blur' },
     { max: 128, message: '新密码不能超过 128 个字符', trigger: 'blur' },
   ],
-  confirmPassword: [{ required: true, message: '请再次输入新密码', trigger: 'blur' }],
 }
 
 const filteredAccounts = computed(() => {
@@ -224,7 +223,6 @@ async function createAccount(): Promise<void> {
 async function openPasswordDialog(account: Account): Promise<void> {
   passwordTarget.value = account
   passwordForm.password = ''
-  passwordForm.confirmPassword = ''
   passwordDialogOpen.value = true
   await nextTick()
   passwordFormRef.value?.clearValidate()
@@ -232,7 +230,6 @@ async function openPasswordDialog(account: Account): Promise<void> {
 
 function resetPasswordDialog(): void {
   passwordForm.password = ''
-  passwordForm.confirmPassword = ''
   passwordTarget.value = undefined
 }
 
@@ -242,10 +239,6 @@ async function updatePassword(): Promise<void> {
 
   const valid = await passwordFormRef.value?.validate().catch(() => false)
   if (!valid) return
-  if (passwordForm.password !== passwordForm.confirmPassword) {
-    ElMessage.warning('两次输入的新密码不一致')
-    return
-  }
 
   actionLoading.value = true
   try {
@@ -580,9 +573,6 @@ onBeforeUnmount(() => setUnauthorizedHandler())
       <el-form ref="passwordFormRef" class="account-form" :model="passwordForm" :rules="passwordRules" label-position="top" @submit.prevent="updatePassword">
         <el-form-item label="新密码" prop="password">
           <el-input v-model="passwordForm.password" type="password" show-password maxlength="128" autocomplete="new-password" placeholder="输入新的登录密码" />
-        </el-form-item>
-        <el-form-item label="确认新密码" prop="confirmPassword">
-          <el-input v-model="passwordForm.confirmPassword" type="password" show-password maxlength="128" autocomplete="new-password" placeholder="再次输入新密码" />
         </el-form-item>
       </el-form>
       <template #footer><el-button @click="passwordDialogOpen = false">取消</el-button><el-button type="primary" :loading="actionLoading" @click="updatePassword">保存新密码</el-button></template>
