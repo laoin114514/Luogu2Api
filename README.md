@@ -175,7 +175,7 @@ cmd/api ──► router ──► handler ──► service ──► repositor
 
 | 差异 | 例子 | 处置 |
 |---|---|---|
-| **安全**（不会丢数据） | 表不存在、缺列、缺索引 | 开了 `DB_MIGRATE_ON_START` 或执行 `api -migrate` 时自动执行 |
+| **安全**（不会丢数据） | 库不存在、表不存在、缺列、缺索引 | 开了 `DB_MIGRATE_ON_START` 或执行 `api -migrate` 时自动执行 |
 | **需人工确认** | 库里多出来的列/索引、列的类型/可空性/默认值/自增不一致 | 只报告 + 给出可直接复制的 `ALTER TABLE`，**永不自动执行** |
 
 后者不自动执行的原因：可能是收窄（`varchar(64)` → `varchar(32)` 会截断数据）、可能是别人
@@ -183,12 +183,20 @@ cmd/api ──► router ──► handler ──► service ──► repositor
 差异时**拒绝启动**——把问题挡在启动阶段（和配置 fail-fast 一个道理），而不是留到某个业务
 请求上变成 `Unknown column`；确认可以忽略时设 `DB_SCHEMA_STRICT=false`。
 
+**数据库本身也归"安全变更"管**：DSN 直接指向 `DB_NAME`，库不存在时 MySQL 在建立连接
+阶段就报 `Error 1049 (42000): Unknown database`，`internal/schema` 那套"表/列/索引"的比对
+根本没机会跑。因此允许改结构的两个入口会先执行 `CREATE DATABASE IF NOT EXISTS ... DEFAULT
+CHARACTER SET utf8mb4`（排序规则交给服务端默认，避免在 5.7/8.0/9.x 之间挑错 collation；
+连接账号需要 `CREATE` 权限）。只读的 `-schema-status` 不建库；不需要自动建库时，手工执行
+「本地运行」里的 `CREATE DATABASE` 即可——库名会被拼进这条 DDL，所以 `DB_NAME` 只允许
+字母、数字、下划线、`$` 与 `-`（配置校验会挡住其它字符）。
+
 三个入口：
 
 ```bash
-go run ./cmd/api                 # 启动服务：校验 +（可选）自动补齐；结构落后就报错退出
-go run ./cmd/api -migrate        # 只做结构变更后退出（部署流程用；仍有需人工确认的差异则退出码非 0）
-go run ./cmd/api -schema-status  # 只打印差异（只读：不改结构、不写审计），不一致时退出码非 0
+go run ./cmd/api                 # 启动服务：建库 + 校验 +（可选）自动补齐；结构落后就报错退出
+go run ./cmd/api -migrate        # 只做结构变更（建库/建表/加列/建索引）后退出（部署流程用；仍有需人工确认的差异则退出码非 0）
+go run ./cmd/api -schema-status  # 只打印差异（只读：不建库、不改结构、不写审计），不一致时退出码非 0
 ```
 
 因为是"模型 vs 库现状"的现场比对，**手工执行的 DDL 不需要在代码里登记**——改完自然一致。
@@ -222,7 +230,7 @@ go run ./cmd/api -schema-status  # 只打印差异（只读：不改结构、不
 
 | 变量 | 说明 |
 |---|---|
-| `DB_HOST` / `DB_USER` / `DB_NAME` | 号池依赖 MySQL；缺任一项启动即报错 |
+| `DB_HOST` / `DB_USER` / `DB_NAME` | 号池依赖 MySQL；缺任一项启动即报错。`DB_NAME` 只允许字母、数字、下划线、`$` 与 `-` |
 | `ACCOUNT_SECRET_KEY` | 凭据加密密钥，`openssl rand -base64 32`（也接受 hex 的 16/24/32 字节） |
 | `LUOGU_OCR_URL` | 验证码识别服务地址（SDK 不内置 OCR） |
 | `LUOGU_OCR_MODE` | 入参形态：`base64`（默认，JSON `{"image_base64":"..."}`）/ `raw`（原始 JPEG 字节） |
@@ -233,7 +241,7 @@ go run ./cmd/api -schema-status  # 只打印差异（只读：不改结构、不
 |---|---|---|
 | `APP_ENV` | `dev` | `prod` 时 gin 走 release、日志输出 JSON |
 | `HTTP_ADDR` | `:8080` | 监听地址 |
-| `DB_MIGRATE_ON_START` | `false` | 启动时自动补齐库结构（建表/加列/建索引）；关闭时只校验，落后即启动失败 |
+| `DB_MIGRATE_ON_START` | `false` | 启动时自动建库并补齐库结构（建表/加列/建索引）；关闭时只校验，落后即启动失败 |
 | `DB_SCHEMA_STRICT` | `true` | 发现需人工确认的结构差异（删列/改类型）时拒绝启动 |
 | `LUOGU_TIMEOUT` / `LUOGU_RETRY` | `30s` / `1` | SDK 超时与内部重试次数 |
 | `ACCOUNT_SWEEP_INTERVAL` | `5m` | 扫描器 tick |
@@ -268,7 +276,7 @@ ACCOUNT_SWEEP_INTERVAL`、抖动越界、密钥长度/编码非法、OCR 地址�
 ## 本地运行
 
 ```bash
-# 1) 建库
+# 1) 建库（可跳过：DB_MIGRATE_ON_START=true 或 api -migrate 会自动建库）
 mysql -uroot -e "CREATE DATABASE IF NOT EXISTS luogu2api DEFAULT CHARSET utf8mb4;"
 
 # 2) 起一个假 OCR（本地联调用，详见 scripts/ocr_stub.py 的说明）
@@ -277,7 +285,7 @@ python3 scripts/ocr_stub.py
 # 3) 配置：复制样例后编辑 configs/.env（已在 .gitignore 里）
 Copy-Item configs/env.example configs/.env
 # 编辑 configs/.env：至少填 ACCOUNT_SECRET_KEY（openssl rand -base64 32）
-# 与 LUOGU_OCR_URL；本地可用 DB_MIGRATE_ON_START=true 让它自动建表
+# 与 LUOGU_OCR_URL；本地可用 DB_MIGRATE_ON_START=true 让它自动建库建表
 
 # 4) 启动（把 .env 导出到当前会话，退出即失效；不会污染系统环境变量）
 pwsh scripts/dev.ps1

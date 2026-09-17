@@ -217,6 +217,25 @@ func TestLoadMissingDBFields(t *testing.T) {
 	}
 }
 
+// 库名会被拼进 CREATE DATABASE 的 DDL，含引号/分号/空白的名字必须在配置层就被拒绝
+func TestLoadRejectsUnsafeDBName(t *testing.T) {
+	for _, name := range []string{"luogu2api; DROP DATABASE mysql; --", "luogu2api`x", "luogu2api luogu2api", "luogu2api/other"} {
+		t.Run(name, func(t *testing.T) {
+			clearEnv(t)
+			setRequired(t)
+			t.Setenv("DB_NAME", name)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("DB_NAME=%q 应报错", name)
+			}
+			if !strings.Contains(err.Error(), "DB_NAME") {
+				t.Errorf("错误信息应提到 DB_NAME: %v", err)
+			}
+		})
+	}
+}
+
 func TestLoadInvalidPoolConfig(t *testing.T) {
 	clearEnv(t)
 	setRequired(t)
@@ -351,6 +370,15 @@ func TestDBDSN(t *testing.T) {
 	want := "root:pwd@tcp(127.0.0.1:3306)/luogu2api?charset=utf8mb4&parseTime=True&loc=Local"
 	if got := db.DSN(); got != want {
 		t.Errorf("DSN() = %q, want %q", got, want)
+	}
+
+	// 不选库的连接串：库还不存在时（建库）只能用它
+	wantServer := "root:pwd@tcp(127.0.0.1:3306)/?charset=utf8mb4&parseTime=True&loc=Local"
+	if got := db.ServerDSN(); got != wantServer {
+		t.Errorf("ServerDSN() = %q, want %q", got, wantServer)
+	}
+	if got := db.DSN(); got != want {
+		t.Errorf("ServerDSN() 不该改动原配置: DSN() = %q, want %q", got, want)
 	}
 
 	// 未显式指定 Params 时应回退到默认参数

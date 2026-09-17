@@ -8,6 +8,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -121,6 +122,33 @@ func (d DB) DSN() string {
 		params = defaultDBParams
 	}
 	return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?%s", d.User, d.Password, d.Host, d.Port, d.Name, params)
+}
+
+// ServerDSN 拼接"不选库"的连接串（user:pwd@tcp(host:port)/?params）。
+//
+// 用于库本身还不存在时的操作——建库就属于这种：DSN 里的库名是连接要选的默认库，
+// 库不存在时 MySQL 在握手阶段就以 1049 拒绝，连一条 SELECT 都发不出去。
+func (d DB) ServerDSN() string {
+	server := d
+	server.Name = ""
+	return server.DSN()
+}
+
+// dbNamePattern 库名允许的字符。
+//
+// 库名最终会被拼进 CREATE DATABASE 的 DDL，所以在配置这一层就挡住引号/分号/空白
+// 之类的字符，而不是指望每个拼接点自己记得转义。
+var dbNamePattern = regexp.MustCompile(`^[A-Za-z0-9_$-]+$`)
+
+// ValidateDBName 校验库名可用：非空且只含字母、数字、下划线、$ 与 -
+func ValidateDBName(name string) error {
+	if name == "" {
+		return fmt.Errorf("config: DB_NAME 不能为空")
+	}
+	if !dbNamePattern.MatchString(name) {
+		return fmt.Errorf("config: DB_NAME %q 含有非法字符（只允许字母、数字、下划线、$ 与 -）", name)
+	}
+	return nil
 }
 
 // Luogu 洛谷客户端配置
@@ -244,6 +272,9 @@ func (c Config) validate() error {
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("config: 已设置 DB_HOST，但缺少 %s", strings.Join(missing, "、"))
+	}
+	if err := ValidateDBName(c.DB.Name); err != nil {
+		return err
 	}
 	if c.DB.MaxIdleConns > c.DB.MaxOpenConns {
 		return fmt.Errorf("config: DB_MAX_IDLE_CONNS(%d) 不应大于 DB_MAX_OPEN_CONNS(%d)",

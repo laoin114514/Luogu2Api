@@ -1,11 +1,11 @@
 // Command api 是 Luogu2Api 的 HTTP 服务入口。
 //
-// 启动顺序：加载配置 → 初始化日志 → 连接 MySQL（必填，号池依赖）→ 校验/迁移库结构
-// → 初始化凭据加解密 → 组装号池并预热 → 组装 service/handler → 启动 gin 与号池扫描器
-// → 等待退出信号 → 优雅关闭（先停 HTTP，再停扫描器，最后关数据库）。
+// 启动顺序：加载配置 → 初始化日志 →（允许改结构时）建库 → 连接 MySQL（必填，号池依赖）
+// → 校验/迁移库结构 → 初始化凭据加解密 → 组装号池并预热 → 组装 service/handler →
+// 启动 gin 与号池扫描器 → 等待退出信号 → 优雅关闭（先停 HTTP，再停扫描器，最后关数据库）。
 //
 // 另有三个只做一件事的入口：-migrate（执行库结构变更后退出）、
-// -schema-status（只打印结构与模型的差异）与 -addr（本地调试时覆盖监听地址）。
+// -schema-status（只打印结构与模型的差异，只读、不建库）与 -addr（本地调试时覆盖监听地址）。
 package main
 
 import (
@@ -38,7 +38,7 @@ import (
 func main() {
 	// 配置以环境变量为准（见 configs/env.example），-addr 仅作本地调试时的覆盖
 	addr := flag.String("addr", "", "覆盖 HTTP_ADDR，例如 127.0.0.1:8080")
-	migrateOnly := flag.Bool("migrate", false, "只执行库结构变更（建表/加列/建索引）然后退出")
+	migrateOnly := flag.Bool("migrate", false, "只执行库结构变更（建库/建表/加列/建索引）然后退出")
 	schemaStatus := flag.Bool("schema-status", false, "只打印库结构与模型的差异然后退出（只读：不改结构、不写审计）")
 	flag.Parse()
 
@@ -66,6 +66,20 @@ func run(addrOverride string, migrateOnly, schemaStatus bool) error {
 	// 收到 SIGINT/SIGTERM 后取消 ctx：既是 SDK 请求的默认 context，也触发优雅关闭
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// 建库：DSN 直接指向 DB_NAME，库本身不存在时连接阶段就是 1049，schema 那套
+	// "表/列/索引"的比对根本没机会跑。建库不会丢数据，因此与"建表/加列"同一个
+	// 把关口——只有允许改结构的两个入口（-migrate、DB_MIGRATE_ON_START）会自动建。
+	// -schema-status 是只读入口，刻意不建库。
+	if !schemaStatus && (migrateOnly || cfg.DB.MigrateOnStart) {
+		created, err := repository.EnsureDatabase(ctx, cfg.DB)
+		if err != nil {
+			return err
+		}
+		if created {
+			logger.Info("数据库不存在，已自动创建", "database", cfg.DB.Name)
+		}
+	}
 
 	// 基础设施：MySQL（号池依赖它，配置校验保证 DB_HOST 必填）
 	db, err := initDB(cfg, logger)
