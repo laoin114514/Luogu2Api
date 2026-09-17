@@ -49,7 +49,8 @@ const (
 	defaultAccountRequestMaxTry   = 3
 	defaultAccountSweepBatchLimit = 200
 	// 加入"代码公开计划"是不可逆动作（洛谷限制 30 天内不能退出），
-	// 因此默认关闭，必须显式开启。
+	// 因此默认关闭，必须显式开启。开关只决定"要不要写"：远端是否已加入
+	// 始终会被只读同步（否则导入早已加入的账号会永远被记成未加入）。
 	defaultAccountJoinOpenSource = false
 
 	// 验证码识别服务
@@ -175,6 +176,9 @@ type Account struct {
 	// 开启后由号池在"登录成功后 / 每轮验证成功后"幂等地补做，成功一次即永久跳过；
 	// 失败只记日志、下轮重试，不影响账号可用性。默认关闭：加入后洛谷限制 30 天
 	// 内不能退出，属于不可逆的隐私设置变更，不该是导入账号的默认副作用。
+	//
+	// 这个开关只决定"要不要写"：账号在洛谷的真实加入状态（偏好设置里的 openSource）
+	// 每次验证都会只读同步进 accounts.open_source_joined，与开关无关。
 	JoinOpenSource bool
 }
 

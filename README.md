@@ -74,25 +74,36 @@ cmd/api ──► router ──► handler ──► service ──► repositor
 并带 `±ACCOUNT_VERIFY_JITTER` 抖动，避免整池在同一时刻一起打洛谷。扫描有重入保护，
 上一轮没跑完时下一个 tick 直接跳过。
 
-### 可选的"代码公开计划"补做（默认关闭）
+### "代码公开计划"：状态同步总是做，加入是显式 opt-in
 
-`ACCOUNT_JOIN_OPEN_SOURCE=true` 时，号池会为池内账号调一次
-`POST /user/setting/preference/update` 把 `openSource` 设成 1（加入洛谷"代码公开计划"）。
+账号在洛谷"代码公开计划"里的状态就是偏好设置里的 `openSource`（1 = 已加入）。号池在
+**手上有活会话**的两个时机处理它：`completeLogin` 登录成功之后、每轮验证成功
+（`handleAccount` 的 `ok` 分支）之后。`ACCOUNT_JOIN_OPEN_SOURCE` 只决定"要不要写"：
+
+| 远端 `openSource` | `ACCOUNT_JOIN_OPEN_SOURCE` | 号池的动作 |
+|---|---|---|
+| 1（已加入） | 任意 | 只读同步：把 `open_source_joined` / `_at` 补成洛谷记录的值 |
+| 0 / -1 | `true` | 读-改-写整份偏好把 `openSource` 置 1，再读一次确认后落库 |
+| 0 / -1 | `false`（默认） | 什么都不写，只确认"远端确实未加入" |
+
+读与写必须分开：**读偏好是幂等的只读请求**（`User.GetPreference`），也是本地这两列准确的
+前提——账号可能在导入前就人工加入过，或导入后在网页上加入，默认配置下也应当如实记录；
+**写偏好（加入）是不可逆动作**（洛谷限制 30 天内不能退出），只能由显式开关触发。
+（早先的实现把读一起关在开关后面，于是默认配置下 `accounts.open_source_joined` 永远是 false。）
 
 刻意**不放在导入的关键路径上**：那会让一个与号池功能无关的写接口成为导入的前置条件
 （洛谷 429/维护 → 无法导入任何账号 → 补员中断），而且"导入即失败不落库"会绕过
-下面那套失败分类，把一次网络抖动判成账号不可用。改为在**手上有活会话**的两个时机补做：
-
-- `completeLogin` 登录成功之后；
-- 每轮验证成功（`handleAccount` 的 `ok` 分支）之后。
+下面那套失败分类，把一次网络抖动判成账号不可用。导入账号会立即尝试首次登录，成功就走上面
+这条路径（开关开启时一并完成加入）；首次登录失败则交给扫描器后续重试。
 
 三条硬约束：
 
 1. **幂等**：`accounts.open_source_joined=true` 时连读都不发，一次请求都不产生；
    远端已经是 1 时只读一次偏好、不写。这一列成功一次就永久跳过。
 2. **失败绝不改账号命运**：不碰 `online`/`status`/`failure_count`/`next_verify_at`，
-   也不占用 `last_error`，只打一条 WARN 并保持 `open_source_joined=false`，
-   交给下一轮验证周期（`ACCOUNT_VERIFY_INTERVAL` + 抖动）自然重试。
+   也不占用 `last_error`，只打一条 WARN 并保持原状，交给下一轮验证周期
+   （`ACCOUNT_VERIFY_INTERVAL` + 抖动）自然重试。读失败按"状态未知"处理：不落库，
+   更不会去写偏好。
 3. **不在数据库事务里做远程调用**：远端成功才落库；落库失败只是下轮再确认一次
    （远端已是 1，那次只读不写）。
 
@@ -249,7 +260,7 @@ go run ./cmd/api -schema-status  # 只打印差异（只读：不建库、不改
 | `ACCOUNT_VERIFY_INTERVAL` | `30m` | 单账号验证间隔（带抖动） |
 | `ACCOUNT_LOGIN_MAX_ATTEMPTS` | `5` | 单次重登任务的尝试次数 |
 | `ACCOUNT_REQUEST_MAX_TRY` | `3` | 业务请求最多换几个账号 |
-| `ACCOUNT_JOIN_OPEN_SOURCE` | `false` | 让池内账号加入洛谷"代码公开计划"（**不可逆 30 天**，见上节） |
+| `ACCOUNT_JOIN_OPEN_SOURCE` | `false` | 让池内账号加入洛谷"代码公开计划"（**不可逆 30 天**，见上节）；关闭时仍会只读同步远端状态 |
 | `ADMIN_TOKEN` | 空 | 为空则**不注册**管理路由（fail closed） |
 
 配置校验：缺少必填项、`DB_MAX_IDLE_CONNS > DB_MAX_OPEN_CONNS`、`ACCOUNT_VERIFY_INTERVAL <
@@ -457,10 +468,12 @@ go test ./internal/schema/ ./internal/repository/ -v
   永不含 `password`/`cookie`；`ADMIN_TOKEN` 必须设置，否则管理路由不注册（避免裸奔的号池管理入口）。
 - **代码公开计划是不可逆的**：开启 `ACCOUNT_JOIN_OPEN_SOURCE` 后账号会陆续加入洛谷"代码公开计划"，
   加入后 **30 天内不能退出**（洛谷直接拒绝把 `openSource` 改回 `0`/`-1`），期间账号代码公开。
-  开启前请确认这是你要的；关掉开关只停止"继续补做"，**不会**把已加入的账号退出来。
+  开启前请确认这是你要的；关掉开关只停止"继续加入"，**不会**把已加入的账号退出来。
+  开关与状态同步无关：账号是否已加入始终会如实记在 `accounts.open_source_joined` / `_at` 上。
 - **SDK 几乎没有写入能力**：`luoguClient` 的写接口只有账号偏好设置（`UpdatePreference` /
   `JoinOpenSourcePlan`，见 SDK 的 `api.md`），题目/记录/题单/讨论/比赛全是只读。
-  号池只在 `ACCOUNT_JOIN_OPEN_SOURCE=true` 时用它补做"加入代码公开计划"（幂等、失败不影响可用性），
+  号池只用 `GetPreference` 做只读状态同步，且只在 `ACCOUNT_JOIN_OPEN_SOURCE=true` 时用
+  `JoinOpenSourcePlan` 补做"加入代码公开计划"（幂等、失败不影响可用性），
   没有对外暴露写接口——要暴露得先决定给谁用、怎么鉴权。
 - **改模型即改结构**：加表/加列/加索引由 `api -migrate`（或其中一个实例开
   `DB_MIGRATE_ON_START=true`）自动执行，**不需要写迁移 SQL**；删列、改类型这类有丢数据

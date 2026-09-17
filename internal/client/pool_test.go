@@ -237,9 +237,14 @@ type fakeSession struct {
 	profile    model.LuoguProfile
 	profileErr error
 
-	codePublicErr   error
-	codePublicAt    time.Time
-	codePublicCalls int
+	// 代码公开计划：codePublicJoined 是"远端当前状态"（CodePublicStatus 只读它），
+	// codePublicAt 是远端记录的加入时间；EnsureCodePublic 模拟"加入"这个写动作。
+	codePublicJoined  bool
+	codePublicAt      time.Time
+	codePublicErr     error // CodePublicStatus（读）的错误
+	codePublicJoinErr error // EnsureCodePublic（写）的错误
+	codePublicReads   int
+	codePublicJoins   int
 
 	loginErrs  []error
 	loginCalls int
@@ -311,22 +316,41 @@ func (f *fakeSession) UserProfile() (model.LuoguProfile, error) {
 	return f.profile, nil
 }
 
-// EnsureCodePublic 由 codePublicErr / codePublicAt 控制，并记录调用次数
+// CodePublicStatus 只读返回远端状态，由 codePublicErr 控制失败，并记录读次数
+func (f *fakeSession) CodePublicStatus() (bool, time.Time, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.codePublicReads++
+	if f.codePublicErr != nil {
+		return false, time.Time{}, f.codePublicErr
+	}
+	return f.codePublicJoined, f.codePublicAt, nil
+}
+
+// EnsureCodePublic 模拟"加入"：成功时远端状态翻成已加入，由 codePublicJoinErr 控制失败
 func (f *fakeSession) EnsureCodePublic() (time.Time, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	f.codePublicCalls++
-	if f.codePublicErr != nil {
-		return time.Time{}, f.codePublicErr
+	f.codePublicJoins++
+	if f.codePublicJoinErr != nil {
+		return time.Time{}, f.codePublicJoinErr
 	}
+	f.codePublicJoined = true
 	return f.codePublicAt, nil
 }
 
-func (f *fakeSession) CodePublicCalls() int {
+func (f *fakeSession) CodePublicReads() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.codePublicCalls
+	return f.codePublicReads
+}
+
+func (f *fakeSession) CodePublicJoins() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.codePublicJoins
 }
 
 func (f *fakeSession) SDK() *sdk.Client { return nil }
@@ -1249,7 +1273,7 @@ func TestStatsCountsDisabledAndPending(t *testing.T) {
 	}
 }
 
-// ---------- 加入"代码公开计划"（可选能力，方案 B：幂等 + 失败不改账号命运） ----------
+// ---------- "代码公开计划"（只读同步总是做；加入是显式 opt-in、幂等、失败不改账号命运） ----------
 
 // enableJoinOpenSource 打开开关（默认关闭，见 config.defaultAccountJoinOpenSource）
 func enableJoinOpenSource(f *poolFixture) { f.pool.cfg.Account.JoinOpenSource = true }
@@ -1269,8 +1293,11 @@ func TestJoinCodePublicOnceThenSkipped(t *testing.T) {
 	if _, err := f.pool.Sweep(context.Background()); err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
-	if got := session.CodePublicCalls(); got != 1 {
-		t.Fatalf("首次验证应补做加入，实际调用 %d 次", got)
+	if got := session.CodePublicReads(); got != 1 {
+		t.Fatalf("首次验证应读一次远端状态，实际读 %d 次", got)
+	}
+	if got := session.CodePublicJoins(); got != 1 {
+		t.Fatalf("远端未加入且开关开启，应补做加入，实际写 %d 次", got)
 	}
 	if f.store.openSourceCount() != 1 {
 		t.Errorf("应落库一次加入记录，实际 %d", f.store.openSourceCount())
@@ -1286,11 +1313,97 @@ func TestJoinCodePublicOnceThenSkipped(t *testing.T) {
 	if _, err := f.pool.Sweep(context.Background()); err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
-	if got := session.CodePublicCalls(); got != 1 {
-		t.Errorf("已加入的账号不应重复请求，实际 %d 次", got)
+	if got := session.CodePublicReads(); got != 1 {
+		t.Errorf("已加入的账号不应重复请求，实际读 %d 次", got)
+	}
+	if got := session.CodePublicJoins(); got != 1 {
+		t.Errorf("已加入的账号不应重复写，实际写 %d 次", got)
 	}
 	if f.store.openSourceCount() != 1 {
 		t.Errorf("不应重复落库，实际 %d 次", f.store.openSourceCount())
+	}
+}
+
+// 核心修正：账号在导入前/导入后已人工加入时，开关关闭也必须把远端真实状态记进本地
+// ——读偏好是幂等的只读请求，开关只决定"要不要写"，不决定"要不要读"
+func TestSyncCodePublicAdoptsRemoteJoinedWithSwitchOff(t *testing.T) {
+	acc := activeAccount(1, "u1", "cookie-1")
+	joinedAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	session := &fakeSession{cookie: "cookie-1", uid: 1965145, codePublicJoined: true, codePublicAt: joinedAt}
+
+	f := newFixture(t, true, []*model.Account{acc}, map[uint]*fakeSession{1: session})
+	if f.pool.cfg.Account.JoinOpenSource {
+		t.Fatal("前置条件：开关默认为关闭")
+	}
+	if _, err := f.pool.Warmup(context.Background()); err != nil {
+		t.Fatalf("Warmup: %v", err)
+	}
+	if _, err := f.pool.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	if got := session.CodePublicReads(); got != 1 {
+		t.Fatalf("应读一次远端状态，实际读 %d 次", got)
+	}
+	if got := session.CodePublicJoins(); got != 0 {
+		t.Errorf("开关关闭时绝不能写偏好（加入不可逆），实际写 %d 次", got)
+	}
+	if f.store.openSourceCount() != 1 {
+		t.Fatalf("远端已加入应补记到本地，实际落库 %d 次", f.store.openSourceCount())
+	}
+	if got := f.store.openSource[0].joinedAt; !got.Equal(joinedAt) {
+		t.Errorf("落库的加入时间 = %v, want 洛谷记录的 %v", got, joinedAt)
+	}
+	if !f.pool.getSession(1).snapshot().OpenSourceJoined {
+		t.Error("内存快照应同步为已加入")
+	}
+
+	// 已确认加入后：连读都不再发
+	if _, err := f.pool.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if got := session.CodePublicReads(); got != 1 {
+		t.Errorf("已确认加入的账号不应重复请求，实际读 %d 次", got)
+	}
+}
+
+// 读远端状态失败：保持"状态未知"，不落库、不误判，下轮重试；也不碰账号可用性
+func TestSyncCodePublicReadFailureKeepsStateUnknown(t *testing.T) {
+	acc := activeAccount(1, "u1", "cookie-1")
+	session := &fakeSession{
+		cookie:        "cookie-1",
+		uid:           1965145,
+		codePublicErr: &sdk.NetworkError{Err: errors.New("i/o timeout")},
+	}
+
+	f := newFixture(t, true, []*model.Account{acc}, map[uint]*fakeSession{1: session})
+	enableJoinOpenSource(f)
+	if _, err := f.pool.Warmup(context.Background()); err != nil {
+		t.Fatalf("Warmup: %v", err)
+	}
+	res, err := f.pool.Sweep(context.Background())
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	if res.OK != 1 {
+		t.Errorf("SweepResult = %+v，读偏好失败不该改变验证结论", res)
+	}
+	if f.store.stateCount() != 0 || len(f.store.transients) != 0 {
+		t.Error("读偏好失败不该写 online/status，也不该占用 last_error/next_verify_at")
+	}
+	if f.store.openSourceCount() != 0 {
+		t.Errorf("读失败不应落库，实际 %d", f.store.openSourceCount())
+	}
+	if got := session.CodePublicJoins(); got != 0 {
+		t.Errorf("状态未知时不能写偏好，实际写 %d 次", got)
+	}
+
+	if _, err := f.pool.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if got := session.CodePublicReads(); got != 2 {
+		t.Errorf("应在下一轮重试读取，实际读 %d 次", got)
 	}
 }
 
@@ -1316,8 +1429,11 @@ func TestReloginJoinsCodePublic(t *testing.T) {
 	if res.Relogged != 1 {
 		t.Fatalf("SweepResult = %+v", res)
 	}
-	if got := session.CodePublicCalls(); got != 1 {
-		t.Errorf("重登成功应补做加入，实际 %d 次", got)
+	if got := session.CodePublicReads(); got != 1 {
+		t.Errorf("重登成功应读一次远端状态，实际读 %d 次", got)
+	}
+	if got := session.CodePublicJoins(); got != 1 {
+		t.Errorf("重登成功应补做加入，实际写 %d 次", got)
 	}
 	if f.store.openSourceCount() != 1 {
 		t.Errorf("应落库一次加入记录，实际 %d", f.store.openSourceCount())
@@ -1331,9 +1447,9 @@ func TestReloginJoinsCodePublic(t *testing.T) {
 func TestJoinCodePublicFailureKeepsAccountServingAndRetries(t *testing.T) {
 	acc := activeAccount(1, "u1", "cookie-1")
 	session := &fakeSession{
-		cookie:        "cookie-1",
-		uid:           1965145,
-		codePublicErr: &sdk.NetworkError{Err: errors.New("i/o timeout")},
+		cookie:            "cookie-1",
+		uid:               1965145,
+		codePublicJoinErr: &sdk.NetworkError{Err: errors.New("i/o timeout")},
 	}
 
 	f := newFixture(t, true, []*model.Account{acc}, map[uint]*fakeSession{1: session})
@@ -1373,15 +1489,15 @@ func TestJoinCodePublicFailureKeepsAccountServingAndRetries(t *testing.T) {
 	if _, err := f.pool.Sweep(context.Background()); err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
-	if got := session.CodePublicCalls(); got != 2 {
-		t.Errorf("应在下一轮重试，实际调用 %d 次", got)
+	if got := session.CodePublicJoins(); got != 2 {
+		t.Errorf("应在下一轮重试加入，实际写 %d 次", got)
 	}
 }
 
-// 开关默认关闭：不发请求、不落库
-func TestJoinCodePublicDisabledByDefault(t *testing.T) {
+// 开关默认关闭：仍会只读同步一次远端状态，但绝不写偏好、不落库
+func TestJoinCodePublicSwitchOffOnlyReadsStatus(t *testing.T) {
 	acc := activeAccount(1, "u1", "cookie-1")
-	session := &fakeSession{cookie: "cookie-1", uid: 1965145}
+	session := &fakeSession{cookie: "cookie-1", uid: 1965145} // 远端未加入
 
 	f := newFixture(t, true, []*model.Account{acc}, map[uint]*fakeSession{1: session})
 	if f.pool.cfg.Account.JoinOpenSource {
@@ -1394,11 +1510,14 @@ func TestJoinCodePublicDisabledByDefault(t *testing.T) {
 		t.Fatalf("Sweep: %v", err)
 	}
 
-	if got := session.CodePublicCalls(); got != 0 {
-		t.Errorf("开关关闭时不应请求，实际 %d 次", got)
+	if got := session.CodePublicReads(); got != 1 {
+		t.Errorf("开关关闭也要读一次远端状态（本地两列必须准确），实际读 %d 次", got)
+	}
+	if got := session.CodePublicJoins(); got != 0 {
+		t.Errorf("开关关闭时不应写偏好，实际写 %d 次", got)
 	}
 	if f.store.openSourceCount() != 0 {
-		t.Errorf("开关关闭时不应落库，实际 %d", f.store.openSourceCount())
+		t.Errorf("远端未加入时不应落库，实际 %d", f.store.openSourceCount())
 	}
 }
 
@@ -1427,7 +1546,8 @@ func TestJoinCodePublicFallsBackToLocalClock(t *testing.T) {
 // 落库失败也不能让账号出问题：远端已加入就地标记，库恢复后下一轮补上
 func TestJoinCodePublicStoreFailureKeepsAccountUsable(t *testing.T) {
 	acc := activeAccount(1, "u1", "cookie-1")
-	session := &fakeSession{cookie: "cookie-1", uid: 1965145, codePublicAt: testNow}
+	// 远端已加入（例如人工开过）：只读同步路径，不该再写偏好
+	session := &fakeSession{cookie: "cookie-1", uid: 1965145, codePublicJoined: true, codePublicAt: testNow}
 
 	f := newFixture(t, true, []*model.Account{acc}, map[uint]*fakeSession{1: session})
 	enableJoinOpenSource(f)
@@ -1454,12 +1574,15 @@ func TestJoinCodePublicStoreFailureKeepsAccountUsable(t *testing.T) {
 		t.Errorf("Stats = %+v, want Online=1", stats)
 	}
 
-	// 数据库恢复后，下一轮验证会把这条记录补上（远端已是 1，SDK 只读不写）
+	// 数据库恢复后，下一轮验证会把这条记录补上（远端已是 1，只读不写）
 	f.store.failWrite = nil
 	if _, err := f.pool.Sweep(context.Background()); err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
 	if f.store.openSourceCount() != 1 {
 		t.Errorf("库恢复后应补落库，实际 %d", f.store.openSourceCount())
+	}
+	if got := session.CodePublicJoins(); got != 0 {
+		t.Errorf("远端已加入时不应写偏好，实际写 %d 次", got)
 	}
 }

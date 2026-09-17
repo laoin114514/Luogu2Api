@@ -36,6 +36,16 @@ type SessionClient interface {
 	Verify() error
 	UserProfile() (model.LuoguProfile, error)
 
+	// CodePublicStatus 只读读取远端偏好，判断账号是否已加入"代码公开计划"。
+	//
+	// 与 EnsureCodePublic 刻意分开：读偏好是幂等的只读请求，用来让本地
+	// accounts.open_source_joined 与洛谷保持一致；而"加入"是不可逆动作
+	// （加入后 30 天内不能退出），只能由明确开启的开关触发写入。
+	//
+	// joined=false 表示远端确认未加入；err != nil 表示这次没读到，调用方
+	// 必须按"状态未知"处理，绝不能据此判定未加入。
+	CodePublicStatus() (joined bool, joinedAt time.Time, err error)
+
 	// EnsureCodePublic 确保账号已加入洛谷"代码公开计划"（openSource=1），幂等。
 	//
 	// 远端已是 1 时只读一次偏好、不写；否则读-改-写整份偏好（该接口是
@@ -127,6 +137,18 @@ func (s *sdkSession) UserProfile() (model.LuoguProfile, error) {
 		Background: detail.Background,
 		RawJSON:    string(raw),
 	}, nil
+}
+
+// CodePublicStatus 只读读取远端偏好里的"代码公开计划"状态。
+//
+// 走 SDK 的 UserService.GetPreference（个人设置 → 偏好设置页），不做任何写入；
+// openSource 不是 1 时返回 joined=false，调用方据此知道"远端确实没加入"。
+func (s *sdkSession) CodePublicStatus() (bool, time.Time, error) {
+	pref, err := s.client.User.GetPreference()
+	if err != nil {
+		return false, time.Time{}, err
+	}
+	return pref.OpenSource == sdk.OpenSourceEnabled, unixTime(pref.OpenSourceJoinTime), nil
 }
 
 // EnsureCodePublic 确保账号已加入洛谷"代码公开计划"（幂等）。

@@ -47,8 +47,9 @@ type AccountDTO struct {
 	LastLoginAt    *time.Time `json:"lastLoginAt,omitempty"`
 	LastVerifiedAt *time.Time `json:"lastVerifiedAt,omitempty"`
 
-	// 代码公开计划（ACCOUNT_JOIN_OPEN_SOURCE 开启时才可能为 true）：
-	// 恒为 false 说明还没做成——失败原因只在日志里，账号本身照常可用。
+	// 代码公开计划：账号在洛谷是否已加入。每次登录/验证后都会只读同步一次远端
+	// 偏好设置，因此开关关闭时它反映账号的真实状态；开启后未加入的账号会被补做加入。
+	// 恒为 false 说明远端确实未加入（读取失败只记日志，账号本身照常可用）。
 	OpenSourceJoined   bool       `json:"openSourceJoined"`
 	OpenSourceJoinedAt *time.Time `json:"openSourceJoinedAt,omitempty"`
 

@@ -360,9 +360,9 @@ func (p *Pool) handleAccount(ctx context.Context, acc *model.Account) accountOut
 		}
 		s.markAlive(now)
 
-		// 上一轮"加入代码公开计划"没做成的账号在这里重试（幂等，已加入的直接跳过）。
-		// 放在验证成功之后：只有确认手上会话有效才值得发这个写请求。
-		p.ensureOpenSource(ctx, s, *acc)
+		// 每次验证成功都只读同步一次"代码公开计划"状态：远端已加入就补记，未加入且
+		// 开关开启才写。放在验证成功之后——只有确认手上会话有效才值得发这个请求。
+		p.syncOpenSource(ctx, s, *acc)
 		return outcomeOK
 
 	case clsUnauthorized, clsForbidden:
@@ -562,42 +562,73 @@ func (p *Pool) completeLogin(ctx context.Context, s *session, acc model.Account)
 
 	s.markAlive(now)
 
-	// 加入代码公开计划是可选的幂等补做（ACCOUNT_JOIN_OPEN_SOURCE），
-	// 失败只记日志，绝不影响"这次重登成功"的判定。
-	p.ensureOpenSource(ctx, s, acc)
+	// 同步"代码公开计划"状态：远端已加入就补记（只读），未加入且开启
+	// ACCOUNT_JOIN_OPEN_SOURCE 时才写。失败只记日志，绝不影响"这次重登成功"的判定。
+	p.syncOpenSource(ctx, s, acc)
 
 	p.logger.Info("账号重登成功",
 		"account_id", s.id, "username", s.username, "uid", uid, "nickname", profile.Name)
 	return outcomeRelogged, nil
 }
 
-// ensureOpenSource 让账号加入洛谷"代码公开计划"（openSource=1），幂等且尽力而为。
+// syncOpenSource 把账号的"代码公开计划"状态与洛谷对齐（幂等、尽力而为）。
 //
 // 刻意不放在导入的关键路径上（那会让一个与号池功能无关的写接口成为导入的前置条件），
-// 而是在"手上有活会话"的两个时机补做：completeLogin 成功后、每轮验证成功后。
+// 而是在"手上有活会话"的两个时机做：completeLogin 成功后、每轮验证成功后。
+//
+// 读与写必须分开，这是本函数最要紧的一条：
+//   - 读远端偏好（CodePublicStatus）每次都做，且**与开关无关**——它是幂等的只读请求，
+//     也是本地两列准确的前提。曾经的实现把读一起关在 ACCOUNT_JOIN_OPEN_SOURCE 后面，
+//     于是默认配置下"账号早已在洛谷加入代码公开计划"也永远记不进来
+//     （accounts.open_source_joined 恒为 false）；
+//   - 写偏好（加入）只在 ACCOUNT_JOIN_OPEN_SOURCE=true 且远端确认未加入时做：加入后
+//     洛谷限制 30 天内不能退出，是不可逆动作，绝不能是默认副作用。
 //
 // 三条硬约束：
 //  1. 幂等：本地 open_source_joined=true 直接跳过，一次请求都不发；远端已是 1
 //     时只读一次偏好即可确认为已加入（不重复写）。
 //  2. 失败绝不改账号命运：不碰 online / status / failure_count / next_verify_at，
-//     只打日志并保持 open_source_joined=false，交给下一轮验证周期自然重试
+//     也不占用 last_error，只打日志，交给下一轮验证周期自然重试
 //     （VerifyInterval 30 分钟 + 抖动，不是热循环）。
 //  3. 不在数据库事务里做远程调用：远端成功才落库；落库失败也只是下轮再确认一次。
-func (p *Pool) ensureOpenSource(ctx context.Context, s *session, acc model.Account) {
-	if !p.cfg.Account.JoinOpenSource || acc.OpenSourceJoined {
-		return
+func (p *Pool) syncOpenSource(ctx context.Context, s *session, acc model.Account) {
+	if acc.OpenSourceJoined {
+		return // 本地已确认加入；远端不可逆，这一行不会再变
 	}
 
 	s.mu.RLock()
 	c := s.client
 	s.mu.RUnlock()
 
-	joinedAt, err := c.EnsureCodePublic()
+	joined, joinedAt, err := c.CodePublicStatus()
+	if err != nil {
+		p.logger.Warn("读取代码公开计划状态未成功（不影响账号可用性，下轮验证再试）",
+			"account_id", s.id, "username", s.username, "err", summarize(err))
+		return
+	}
+	if joined {
+		p.recordOpenSourceJoined(ctx, s, joinedAt)
+		return
+	}
+
+	if !p.cfg.Account.JoinOpenSource {
+		return // 远端未加入且开关关闭：只同步状态，绝不写偏好
+	}
+
+	joinedAt, err = c.EnsureCodePublic()
 	if err != nil {
 		p.logger.Warn("加入代码公开计划未成功（不影响账号可用性，下轮验证再试）",
 			"account_id", s.id, "username", s.username, "err", summarize(err))
 		return
 	}
+	p.recordOpenSourceJoined(ctx, s, joinedAt)
+}
+
+// recordOpenSourceJoined 远端确认已加入后落库并同步内存快照。
+//
+// 落库失败不改变"远端已加入"这个事实，因此内存快照照常标记（本进程内不再重复请求）；
+// 下一轮验证仍会用数据库里的行再确认一次，库恢复后自然补上。
+func (p *Pool) recordOpenSourceJoined(ctx context.Context, s *session, joinedAt time.Time) {
 	if joinedAt.IsZero() {
 		// 洛谷没给出加入时间（理论上不该发生）：用本进程时钟兜底，
 		// 它只用于展示"何时可退出"，不参与任何判定
@@ -609,7 +640,6 @@ func (p *Pool) ensureOpenSource(ctx context.Context, s *session, acc model.Accou
 			"account_id", s.id, "username", s.username, "err", err.Error())
 	}
 
-	// 无论落库成功与否都更新内存快照：远端确实已经加入，本进程内不必重复请求
 	s.mu.Lock()
 	s.account.OpenSourceJoined = true
 	s.account.OpenSourceJoinedAt = &joinedAt
