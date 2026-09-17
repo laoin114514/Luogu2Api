@@ -287,9 +287,10 @@ powershell -ExecutionPolicy Bypass -File scripts/dev.ps1
 
 ### Pool Dashboard
 
-`Pool-Dashboard` 是一个独立的 pnpm + Vue 项目，构建产物不提交；Go 服务会将其同源托管在
+`Pool-Dashboard` 是一个独立的 pnpm + Vue + Element Plus 项目，构建产物不提交；Go 服务会将其同源托管在
 `/dashboard/`。它使用既有的管理 API 完成账号列表、导入、启停、删除和强制重登，不会接触或显示
-密码、cookie 等凭据。管理令牌仅保存到当前浏览器标签页的 `sessionStorage`。
+密码、cookie 等凭据。首次进入会用受保护的账号列表接口校验 `ADMIN_TOKEN`；令牌只保存在当前浏览器
+标签页的 `sessionStorage`，管理请求收到 `401` 会立刻清除令牌并回到登录页。
 
 ```powershell
 # 首次或依赖变化后
@@ -304,6 +305,14 @@ pnpm --dir Pool-Dashboard dev
 
 浏览器访问 `http://127.0.0.1:8080/dashboard/`，输入与后端 `ADMIN_TOKEN` 一致的令牌即可使用。
 没有执行前端构建时，Go API 仍可正常启动，但 `/dashboard/` 没有可提供的页面文件。
+
+#### Vue 组件定位（开发调试）
+
+`http://127.0.0.1:8080/dashboard/` 是 Go 托管的 `pnpm build` 生产构建产物，Vue Devtools 不会
+在这里提供组件检查或页面定位。需要调试组件时，保持 Go 服务运行后执行
+`pnpm --dir Pool-Dashboard dev`，再按 Vite 终端输出的地址访问（通常是
+`http://localhost:5173/dashboard/`）。Vite 会把 `/api` 同源代理到 `127.0.0.1:8080`；同时需要在
+浏览器中安装并启用 Vue Devtools 扩展。不要为 Go 托管的管理台生产页强制开启 Devtools。
 
 不用脚本也可以照旧导出环境变量（**已存在的非空变量优先于 `.env`**，脚本与 compose
 的 `env_file` 都是这个优先级）：
