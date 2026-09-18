@@ -103,5 +103,6 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD wget -q -O /dev/null http://127.0.0.1:8080/livez || exit 1
 
-# 参数直接透传：-migrate（只做结构变更）、-schema-status（只打印差异）、-addr（改监听地址）
+# 参数直接透传：-migrate（只做结构变更）、-schema-status（只打印差异）、
+# -genkey（生成 ACCOUNT_SECRET_KEY / ADMIN_TOKEN）、-addr（改监听地址）
 ENTRYPOINT ["/app/luogu2api"]

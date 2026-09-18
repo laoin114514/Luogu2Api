@@ -4,8 +4,9 @@
 // → 校验/迁移库结构 → 初始化凭据加解密 → 组装号池并预热 → 组装 service/handler →
 // 启动 gin 与号池扫描器 → 等待退出信号 → 优雅关闭（先停 HTTP，再停扫描器，最后关数据库）。
 //
-// 另有三个只做一件事的入口：-migrate（执行库结构变更后退出）、
-// -schema-status（只打印结构与模型的差异，只读、不建库）与 -addr（本地调试时覆盖监听地址）。
+// 另有几个只做一件事的入口：-migrate（执行库结构变更后退出）、-schema-status（只打印结构与模型的
+// 差异，只读、不建库）、-genkey（打印一份可直接粘贴的 ACCOUNT_SECRET_KEY / ADMIN_TOKEN 后退出）
+// 与 -addr（本地调试时覆盖监听地址）。
 package main
 
 import (
@@ -13,6 +14,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -41,12 +43,42 @@ func main() {
 	addr := flag.String("addr", "", "覆盖 HTTP_ADDR，例如 127.0.0.1:8080")
 	migrateOnly := flag.Bool("migrate", false, "只执行库结构变更（建库/建表/加列/建索引）然后退出")
 	schemaStatus := flag.Bool("schema-status", false, "只打印库结构与模型的差异然后退出（只读：不改结构、不写审计）")
+	genKey := flag.Bool("genkey", false, "打印一份可直接粘贴的 ACCOUNT_SECRET_KEY / ADMIN_TOKEN 然后退出（不读配置、不连数据库）")
 	flag.Parse()
+
+	// -genkey 放在 config.Load 之前：它恰恰是在"还没有密钥可填"的时候用的；
+	// 也刻意不读环境变量、不连数据库，任何机器上都能跑。
+	if *genKey {
+		if err := printKeys(os.Stdout); err != nil {
+			slog.Error("生成密钥失败", "err", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if err := run(*addr, *migrateOnly, *schemaStatus); err != nil {
 		slog.Error("服务退出", "err", err)
 		os.Exit(1)
 	}
+}
+
+// printKeys 输出一份可直接粘贴进 configs/.env 的密钥与令牌（-genkey）。
+//
+// 内置这个入口是因为 openssl 不是处处都有（Windows 默认没有，容器运行时镜像里也没有），
+// 而这两个值都不该随手写：ACCOUNT_SECRET_KEY 直接是落库凭据（洛谷密码/cookie）的 AES 密钥，
+// ADMIN_TOKEN 是 /api/v1 全部接口的唯一口令——它对格式没有要求（任意非空字符串都能用），
+// 这里给随机值只是"拿不准就照抄"的默认选项。
+func printKeys(w io.Writer) error {
+	secretKey, err := secret.GenerateKey()
+	if err != nil {
+		return err
+	}
+	adminToken, err := secret.GenerateToken()
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(w, "ACCOUNT_SECRET_KEY=%s\nADMIN_TOKEN=%s\n", secretKey, adminToken)
+	return err
 }
 
 func run(addrOverride string, migrateOnly, schemaStatus bool) error {
@@ -128,6 +160,12 @@ func run(addrOverride string, migrateOnly, schemaStatus bool) error {
 	pool := client.NewPool(ctx, cfg, accountRepo, logger)
 	warm, err := pool.Warmup(ctx)
 	if err != nil {
+		// 密钥与库里的密文不匹配时给一条明确的恢复方向：这不是数据库坏了，而是
+		// ACCOUNT_SECRET_KEY 被换过或丢了——账号需要重新填一次密码（见 README）。
+		if errors.Is(err, secret.ErrDecrypt) {
+			return fmt.Errorf("号池预热失败：ACCOUNT_SECRET_KEY 与库里的密文不匹配（密钥被换过或丢失？），"+
+				"账号需要重新填写密码，恢复步骤见 README「密钥丢失与备份」: %w", err)
+		}
 		return fmt.Errorf("号池预热失败: %w", err)
 	}
 	logger.Info("号池预热完成",

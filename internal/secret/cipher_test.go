@@ -3,6 +3,7 @@ package secret
 import (
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -109,8 +110,13 @@ func TestOpenWrongKeyFails(t *testing.T) {
 	}
 
 	other := mustCipher(t, key16)
-	if _, err := other.Open(sealed); err == nil {
-		t.Error("换密钥后必须解密失败")
+	_, err = other.Open(sealed)
+	if err == nil {
+		t.Fatal("换密钥后必须解密失败")
+	}
+	// 启动路径靠它区分"密钥不对"与其它错误，进而给出恢复指引
+	if !errors.Is(err, ErrDecrypt) {
+		t.Errorf("错误应能被 errors.Is(err, ErrDecrypt) 识别: %v", err)
 	}
 }
 

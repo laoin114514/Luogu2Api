@@ -26,6 +26,13 @@ const (
 	currentPrefix = versionV1
 )
 
+// ErrDecrypt 密文解不开：ACCOUNT_SECRET_KEY 与加密时用的密钥不一致（被换过 / 丢了），
+// 或密文被篡改。二者在密码学上无法区分，所以共用一个哨兵。
+//
+// 启动预热读账号时撞上它，等价于"服务起不来"；调用方据此可以给出比底层 cipher 报错
+// 更有用的恢复指引（见 README「密钥丢失与备份」）。
+var ErrDecrypt = errors.New("secret: 解密失败")
+
 // Cipher AES-GCM 加解密器，可并发使用
 type Cipher struct {
 	aead cipher.AEAD
@@ -101,7 +108,7 @@ func (c *Cipher) Open(encoded string) (string, error) {
 
 	plain, err := c.aead.Open(nil, data[:nonceSize], data[nonceSize:], nil)
 	if err != nil {
-		return "", fmt.Errorf("secret: 解密失败（密钥不匹配或数据被篡改）: %w", err)
+		return "", fmt.Errorf("%w（密钥不匹配或数据被篡改）: %w", ErrDecrypt, err)
 	}
 	return string(plain), nil
 }

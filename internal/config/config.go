@@ -288,10 +288,10 @@ func (c Config) validate() error {
 	}
 
 	if c.Account.SecretKey == "" {
-		return fmt.Errorf("config: ACCOUNT_SECRET_KEY 必填（用 openssl rand -base64 32 生成）")
+		return fmt.Errorf("config: ACCOUNT_SECRET_KEY 必填（可用 go run ./cmd/api -genkey 生成，或 openssl rand -base64 32）")
 	}
 	if _, err := secret.NewCipher(c.Account.SecretKey); err != nil {
-		return fmt.Errorf("config: ACCOUNT_SECRET_KEY 不可用: %w", err)
+		return fmt.Errorf("config: ACCOUNT_SECRET_KEY 不可用（可用 go run ./cmd/api -genkey 生成随机密钥）: %w", err)
 	}
 
 	if err := c.Account.validate(); err != nil {

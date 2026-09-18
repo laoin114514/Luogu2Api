@@ -247,7 +247,7 @@ go run ./cmd/api -schema-status  # 只打印差异（只读：不建库、不改
 | 变量 | 说明 |
 |---|---|
 | `DB_HOST` / `DB_USER` / `DB_NAME` | 号池依赖 MySQL；缺任一项启动即报错。`DB_NAME` 只允许字母、数字、下划线、`$` 与 `-` |
-| `ACCOUNT_SECRET_KEY` | 凭据加密密钥，`openssl rand -base64 32`（也接受 hex 的 16/24/32 字节） |
+| `ACCOUNT_SECRET_KEY` | 凭据加密密钥（AES-GCM，保护落库的洛谷密码/cookie）。`go run ./cmd/api -genkey` 直接生成（不依赖 openssl；容器里 `docker compose run --rm api -genkey`），也接受 hex/base64 编码的 16/24/32 字节。**不能**随手写口令：解码后长度不对会被拒绝 |
 | `LUOGU_OCR_URL` | 验证码识别服务地址（SDK 不内置 OCR） |
 | `LUOGU_OCR_MODE` | 入参形态：`base64`（默认，JSON `{"image_base64":"..."}`）/ `raw`（原始 JPEG 字节） |
 
@@ -265,7 +265,7 @@ go run ./cmd/api -schema-status  # 只打印差异（只读：不建库、不改
 | `ACCOUNT_LOGIN_MAX_ATTEMPTS` | `5` | 单次重登任务的尝试次数 |
 | `ACCOUNT_REQUEST_MAX_TRY` | `3` | 业务请求最多换几个账号 |
 | `ACCOUNT_JOIN_OPEN_SOURCE` | `false` | 让池内账号加入洛谷"代码公开计划"（**不可逆 30 天**，见上节）；关闭时仍会只读同步远端状态 |
-| `ADMIN_TOKEN` | 空 | `/api/v1` **全部接口**的访问令牌（`X-Admin-Token`）。为空时中间件拒绝所有 API 请求（fail closed，只有探活接口可用），实际部署必须设置 |
+| `ADMIN_TOKEN` | 空 | `/api/v1` **全部接口**的访问令牌（`X-Admin-Token`）。为空时中间件拒绝所有 API 请求（fail closed，只有探活接口可用），实际部署必须设置。**格式没有任何要求**，任意非空字符串都能用（本地填 `dev-token` 即可），生产建议用 `-genkey` 给的随机值 |
 
 配置校验：缺少必填项、`DB_MAX_IDLE_CONNS > DB_MAX_OPEN_CONNS`、`ACCOUNT_VERIFY_INTERVAL <
 ACCOUNT_SWEEP_INTERVAL`、抖动越界、密钥长度/编码非法、OCR 地址缺协议头，都会在启动时直接报错。
@@ -361,7 +361,7 @@ python3 scripts/ocr_stub.py
 
 # 3) 配置：复制样例后编辑 configs/.env（已在 .gitignore 里）
 Copy-Item configs/env.example configs/.env
-# 编辑 configs/.env：至少填 ACCOUNT_SECRET_KEY（openssl rand -base64 32）
+# 编辑 configs/.env：至少填 ACCOUNT_SECRET_KEY（go run ./cmd/api -genkey 生成，跨平台、不依赖 openssl）
 # 与 LUOGU_OCR_URL；本地可用 DB_MIGRATE_ON_START=true 让它自动建库建表
 
 # 4) 启动（把 .env 导出到当前会话，退出即失效；不会污染系统环境变量）
@@ -406,6 +406,7 @@ pnpm --dir Pool-Dashboard dev
 ```powershell
 $env:DB_HOST="127.0.0.1"; $env:DB_USER="root"; $env:DB_PASSWORD=""; $env:DB_NAME="luogu2api"
 $env:DB_MIGRATE_ON_START="true"
+# 密钥/令牌也可以直接抄 go run ./cmd/api -genkey 输出的两行（不依赖 openssl）
 $env:ACCOUNT_SECRET_KEY=(openssl rand -base64 32)
 $env:LUOGU_OCR_URL="http://127.0.0.1:9898/ocr"
 $env:ADMIN_TOKEN="dev-token"
@@ -541,6 +542,7 @@ docker compose logs -f api                  # 看日志（APP_ENV=prod 时是 JS
 docker compose ps                           # 状态与健康检查结果
 docker compose run --rm api -migrate        # 只做结构变更（建库/建表/加列/建索引）
 docker compose run --rm api -schema-status  # 只打印库结构与模型的差异（只读）
+docker compose run --rm api -genkey         # 生成 ACCOUNT_SECRET_KEY / ADMIN_TOKEN（不读配置、不连库）
 docker compose exec mysql mysql -uroot -p   # 进库排查（密码 = .env 里的 DB_PASSWORD）
 docker compose down                         # 停栈；加 -v 连数据卷一起删（账号数据会没）
 ```
@@ -586,12 +588,45 @@ go test ./internal/schema/ ./internal/repository/ -v
 `schema` 的集成测试会真的建表、加列，再故意制造『有人手工改过库』的差异，断言只报告不执行。
 类型归一化（`bool` ↔ `tinyint(1)`、整数显示宽度、可空时间列、COMMENT）写错的话，那里会立刻红。
 
+## 密钥丢失与备份
+
+`ACCOUNT_SECRET_KEY` 是唯一的解密入口，它保护 `accounts` 表里的 `password_enc`（洛谷密码）与
+`cookie_enc`（登录 cookie）两列。密钥丢了，这两列就是不可逆的密文——这不是缺陷，正是加密的
+意义（拿到数据库备份的人没有密钥就解不开）。**但不需要重新导入账号**：`username`、昵称、洛谷
+UID、平台档案、号池状态、失败计数、代码公开计划的记录都是明文列，账号行与 ID 都还在；cookie
+本来就会过期，所以真正要补的只有**密码**（每个账号一次）。
+
+要注意的是：密钥不对时服务**起不来**（启动预热读账号就要解密，会以「ACCOUNT_SECRET_KEY 与库里
+的密文不匹配」退出），管理接口也读不了这些行（列表 / 详情 / 改密内部都会先解密，只有 DELETE
+例外）。所以恢复要先走一次 SQL：
+
+1. 清掉两列旧密文，并把账号置成 `disabled`——空密文表示「没有凭据」，不再报解密失败；置成
+   `disabled` 是为了让扫描器先别拿空密码去试（否则每个账号都会因「密码错误」再被判一次
+   `disabled`，恢复时还得额外复位）：
+
+   ```sql
+   UPDATE accounts
+      SET password_enc = '', cookie_enc = '', online = 0, status = 'disabled', next_verify_at = NULL
+    WHERE deleted_at IS NULL;
+   ```
+
+2. 用**新的** `ACCOUNT_SECRET_KEY`（`api -genkey` 生成）启动服务：此时号池是空的（`/healthz`
+   报 degraded），但管理接口已经能正常读写这些账号。
+3. 逐个恢复：`PUT /api/v1/admin/accounts/:id/password {"password":"真实密码"}` 写入新密文，再
+   `PATCH /api/v1/admin/accounts/:id {"enabled":true}` 把它从 `disabled` 复位成 `new`，交给扫描器
+   重新登录。账号 ID、username、档案与统计全部保留。
+   想省一步：`DELETE` 后 `POST` 同名账号会走「复活」分支（主键不变），代价是档案与统计一起清零。
+
+**备份规则**：密钥要进密码管理器 / Secret 管理器 / 离线保管，但**不要**和数据库 dump 放在同一个
+备份包里——两者一起泄漏，加密就白做了。同理，`configs/.env` 与数据库也应该分开备份。
+
 ## 部署注意
 
 - **单实例假设**：扫描器与号池都在进程内。多实例部署会同时重登同一账号、互相踢掉会话，
   需要引入 DB 租约/选主（`service.PoolService` 是预留的接入点）。
-- **密钥轮换**：密文带 `v1:` 版本前缀，便于平滑换算法；换 `ACCOUNT_SECRET_KEY` 前必须先用
-  旧密钥解密、再用新密钥重新加密（否则所有凭据都解不开，且启动时会明确报"解密失败"）。
+- **密钥轮换与丢失**：换 `ACCOUNT_SECRET_KEY` 前必须先用旧密钥解密、再用新密钥重新加密
+  （密文带 `v1:` 版本前缀，便于平滑换算法）；密钥丢了会怎样、怎么恢复、为什么它必须和数据库
+  分开备份，见「密钥丢失与备份」一节。
 - **风控**：同 IP 多账号、固定 UA、高频登录都是洛谷的风控特征。请保持
   `ACCOUNT_VERIFY_CONCURRENCY=1`、给 `ACCOUNT_VERIFY_INTERVAL` 留足抖动，不要为了"更快发现掉线"
   把验证间隔调到分钟级。

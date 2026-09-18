@@ -639,9 +639,16 @@ func TestAccountWrongKeyFailsLoudly(t *testing.T) {
 	}
 	wrong := NewAccountRepository(db, other)
 
-	if _, err := wrong.GetByID(ctx, acc.ID); err == nil {
-		t.Error("换密钥后读取应报错，而不是静默返回空凭据")
-	} else if !strings.Contains(err.Error(), "解密") {
+	_, err = wrong.GetByID(ctx, acc.ID)
+	if err == nil {
+		t.Fatal("换密钥后读取应报错，而不是静默返回空凭据")
+	}
+	if !strings.Contains(err.Error(), "解密") {
 		t.Errorf("错误信息应指出解密失败: %v", err)
+	}
+	// 启动路径靠这个哨兵给出恢复指引（见 README「密钥丢失与备份」）；
+	// 中间隔着 repository 与号池两层的包装，必须能穿透
+	if !errors.Is(err, secret.ErrDecrypt) {
+		t.Errorf("错误应能被 errors.Is(err, secret.ErrDecrypt) 识别: %v", err)
 	}
 }
