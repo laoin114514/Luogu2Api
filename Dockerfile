@@ -50,6 +50,16 @@ FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
 
+# Go 模块代理。容器里**不会**继承宿主机的 go env（本地能 build 不代表镜像里能 build）：
+# 官方默认的 https://proxy.golang.org 是 Google 的地址，国内直连会
+#   dial tcp 142.250.x.x:443: i/o timeout
+# 而且只挂在 go mod download 这一步（同一次构建里 pnpm 那步照常成功，容易误判成断网）。
+# 分隔符用 | 而不是 ,：| 在**任何**错误时都会回退到下一个源（, 只在 404/410 时回退），
+# 所以国内镜像不通时也能自动落到官方源，不会把构建卡死在一个源上。
+# 自建代理/私服：docker build --build-arg GOPROXY=https://your.proxy,direct .
+ARG GOPROXY=https://goproxy.cn|https://proxy.golang.org|direct
+ENV GOPROXY=${GOPROXY}
+
 WORKDIR /src
 
 # 依赖清单。因为 replace 指向本地子模块，go mod download 也需要读到它的 go.mod/go.sum。

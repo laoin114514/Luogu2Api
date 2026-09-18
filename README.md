@@ -559,6 +559,11 @@ docker compose down                         # 停栈；加 -v 连数据卷一起
 - **探活**：镜像的 `HEALTHCHECK` 打的是恒定 200 的 `/livez`（只看进程存活）。`/healthz` 在号池没有
   在线账号时会返回 503（设计如此），首次部署还没导账号时会把容器判成 unhealthy，不适合当探针；
   `/api/v1/**` 全部要令牌，探针也不该带。
+- **构建期网络（Go 模块）**：镜像里的 `go mod download` 走容器自己的 `GOPROXY`，**不继承**宿主机的
+  `go env`——本地能 build 不代表镜像里能 build。Dockerfile 的 builder 段默认已设成
+  `https://goproxy.cn|https://proxy.golang.org|direct`；国内直连官方源会 `dial tcp 142.250.x.x:443:
+  i/o timeout`，表现为「pnpm 那步成功、`go mod download` 这步超时」，不是断网。要换自建代理/私服：
+  `docker build --build-arg GOPROXY=https://your.proxy,direct .`，或在 compose 的 `build.args` 里加同一项。
 - **多架构**：`docker buildx build --platform linux/amd64,linux/arm64 .` 可直接用（Go 段交叉编译，
   Node 段跑在构建机上）；需要 BuildKit（Docker 23+ 默认开启）。
 - **单实例**：扫描器与号池都在进程内，多副本会互相踢会话，本栈刻意只起一个 api；其余约束见「部署注意」。
