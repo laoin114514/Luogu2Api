@@ -10,6 +10,7 @@
 ```
 Luogu2Api/
 ├── cmd/api/main.go              # 入口：配置 → 日志 → MySQL → 号池预热 → 组装 → 启停
+├── luogu2api/                  # 本服务 HTTP API 的 Go 客户端（SDK）：单目录、只用标准库，可直接复制走
 ├── Pool-Dashboard/              # pnpm + Vue 管理台（构建后由 Gin 在 /dashboard/ 托管）
 ├── internal/
 │   ├── client/                  # 唯一接触洛谷 SDK 的包
@@ -294,6 +295,60 @@ ACCOUNT_SWEEP_INTERVAL`、抖动越界、密钥长度/编码非法、OCR 地址�
 
 业务码：`0` 成功、`400` 参数错、`401` 令牌无效、`404` 不存在、`409` 冲突、`500` 内部错误、
 `1001` 号池无可用账号（HTTP 503）、`1002` 洛谷登录态全部失效（HTTP 502）。
+
+## Go SDK
+
+`luogu2api/` 目录是本服务 HTTP API 的 Go 客户端（SDK，包名 `luogu2api`）。**整个目录就是一个
+自包含的包**：只用标准库、不 import 本仓库的任何其它代码，把它整个复制进别的工程就能直接用
+（用法与接口清单见 `luogu2api/README.md`）；留在本仓库里时按主模块路径导入。它**只封装对外
+业务接口**（题目、提交记录、号池状态）与两个公开探活接口，**刻意不封装** `/api/v1/admin/accounts`
+——导入账号、改密、启停属于运维动作，继续走管理台或 curl；SDK 的使用者拿到的是「查数据」的能力，
+不需要经手号池里的账号凭据。
+
+```go
+// 仓库内：import luogu2api "github.com/laoin114514/luogu2api/luogu2api"
+// 复制走：把 luogu2api/ 目录拷进你的工程后按自己的模块路径 import（包名不变）
+
+sdk, err := luogu2api.NewSDK("http://127.0.0.1:8080", os.Getenv("ADMIN_TOKEN"))
+if err != nil {
+    return err // 地址非法或令牌为空：构造期就失败（fail fast）
+}
+
+problem, err := sdk.Problem.Get(ctx, "P1001")              // GET /api/v1/problems/P1001
+result, err := sdk.Problem.Search(ctx, luogu2api.SearchParams{
+    Keyword: "A+B", Page: 1, PageSize: 20,               // GET /api/v1/problems?keyword=...
+})
+page, err := sdk.Record.ListByUser(ctx, 1582049, luogu2api.RecordListParams{
+    PID: "P1001", Status: luogu2api.RecordStatusAccepted, // GET /api/v1/users/:uid/records
+})
+status, err := sdk.Pool.Status(ctx)                         // GET /api/v1/pool/status
+report, err := sdk.Health.Check(ctx)                        // GET /healthz（503 也返回报告）
+```
+
+令牌在 `NewSDK` 时注入，之后每个请求都会带 `X-Admin-Token`；`Client` 没有可变状态，可并发使用。
+错误统一是 `*luogu2api.Error`（HTTP 状态码 + 业务码 + 服务端文案）；非业务错误（网络、非法 JSON、
+context 取消）保持原始错误链，`errors.Is` / `errors.As` 照常可用：
+
+```go
+page, err := sdk.Record.ListByUser(ctx, uid, params)
+switch {
+case err == nil:
+    // 分页直接用 page.Count / page.TotalPages / page.PageRecordCount
+case luogu2api.IsPoolExhausted(err):        // 1001：号池没有可用账号，稍后重试
+case luogu2api.IsUpstreamUnauthorized(err): // 1002：所有账号登录态都失效，需要人工处理
+case luogu2api.IsUnauthorized(err):         // 401：ADMIN_TOKEN 不对
+default:
+    return err
+}
+```
+
+可选参数：`WithHTTPClient`（自备 client / 代理 / 埋点）、`WithTimeout`（默认 30s）、`WithUserAgent`、
+`WithMaxResponseBytes`（默认 16 MiB）。响应类型（`Problem`、`SearchResult`、`RecordPage`、
+`PoolStatus`、`HealthReport`…）都在根目录 `types.go`，与上一节「接口」的 JSON 逐字段对应。
+
+测试：`go test ./luogu2api/` 是 SDK 自身的假服务端用例（只依赖标准库）。这个目录要一直保持
+「只用标准库、复制走就能用」，所以任何依赖本仓库 `internal/*` 的测试都不放进 `luogu2api/`，
+而是放在对应内部包旁边（例如拿真实 router 与 SDK 对账的契约测试）。
 
 ## 本地运行
 
